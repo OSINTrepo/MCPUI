@@ -193,6 +193,42 @@ def guess_target_type(task: str) -> list[dict]:
     return detect_targets(task)
 
 
+# --- Компания → домены: эвристические кандидаты для проверки резолвингом --------
+# Юридические формы/суффиксы, которые НЕ входят в доменное имя бренда.
+_ORG_SUFFIX = {
+    "sa", "s", "a", "sl", "sau", "slu", "sас", "inc", "llc", "ltd", "limited",
+    "corp", "corporation", "co", "company", "gmbh", "ag", "plc", "group", "grupo",
+    "holding", "holdings", "spa", "srl", "bv", "nv", "oy", "ab", "as", "pao",
+    "oao", "ooo", "zao", "ip", "пао", "оао", "ооо", "зао", "ао", "ип",
+}
+_BRAND_TLDS = ("com", "net", "org", "io", "es", "eu", "co", "group", "tech")
+
+
+def company_domain_candidates(name: str, limit: int = 8) -> list[str]:
+    """Кандидаты доменов из названия компании (детерминированно, без ключей).
+
+    Берём значащие токены (без юр. форм), склеиваем слитно и через дефис,
+    навешиваем частые TLD. Кандидаты потом ПРОВЕРЯЮТСЯ резолвингом (server.py) —
+    сюда попадают только реально существующие домены, ничего не выдумывается."""
+    toks = [re.sub(r"[^a-z0-9]", "", t.lower())
+            for t in re.split(r"[\s.,«»\"'()]+", name or "") if t.strip()]
+    toks = [t for t in toks if t and t not in _ORG_SUFFIX and not t.isdigit()]
+    if not toks:
+        return []
+    joined = "".join(toks)
+    stems: list[str] = []
+    for s in (joined, "-".join(toks), toks[0], "".join(toks[:2])):
+        if 2 <= len(s) <= 40 and s not in stems:
+            stems.append(s)
+    out: list[str] = []
+    for stem in stems:
+        for tld in _BRAND_TLDS:
+            cand = f"{stem}.{tld}"
+            if cand not in out:
+                out.append(cand)
+    return out[:limit]
+
+
 # --- Проверенные рецепты: (target_type, server_id) -> (tool, args_fn) ---
 # args_fn(value) -> dict. Схемы подтверждены тестами предыдущего этапа.
 CURATED: dict[tuple[str, str], tuple[str, object]] = {
@@ -250,7 +286,78 @@ CURATED: dict[tuple[str, str], tuple[str, object]] = {
     ("phone", "contrastapi"): ("phone_lookup", lambda v: {"number": v}),
     ("domain", "contrastapi"): ("domain_report", lambda v: {"domain": v}),
     ("ip", "contrastapi"): ("ip_lookup", lambda v: {"ip": v}),
+    # directapi — прямые публичные API (RDAP/GLEIF). Домен/IP в авто-режиме идут
+    # глубоким веером (DEEP_DOMAIN/DEEP_IP ниже); эти записи — для ручного вызова
+    # и не-deep режима. Компания → глобальный реестр LEI (GLEIF).
+    ("domain", "directapi"): ("rdap_domain", lambda v: {"domain": v}),
+    ("ip", "directapi"): ("rdap_ip", lambda v: {"ip": v}),
+    ("company", "directapi"): ("gleif_entity", lambda v: {"query": v}),
 }
+
+# --- Глубокое досье по домену/IP: набор ПРИКреплённых вызовов (server, tool, args) ---
+# Разворачивается в server.py в отдельные шаги, обходя лимит «1 инструмент на
+# (тип,сервер)» из CURATED (VirusTotal зовём несколько раз — по каждой связи).
+# Серверы, которых нет в каталоге (напр. ключ не введён), пропускаются в build_plan.
+VT_DOMAIN_RELATIONSHIPS = [
+    "resolutions",                    # пассивный DNS (домены/IP на диапазоне)
+    "subdomains",                     # поддомены
+    "historical_ssl_certificates",    # исторические SSL-сертификаты
+    "communicating_files",            # общающиеся файлы (malware)
+    "historical_whois",               # исторический WHOIS
+]
+
+
+def deep_domain_steps(v: str, vt_rel_cap: int) -> list[tuple[str, str, dict]]:
+    """Батарея вызовов для глубокого досье по домену (как в референс-отчёте)."""
+    steps: list[tuple[str, str, dict]] = [
+        ("virustotal", "get_domain_report", {"domain": v}),
+    ]
+    # VT-связи — по одной на вызов; на free-тарифе (4 req/min) режем cap'ом.
+    for rel in VT_DOMAIN_RELATIONSHIPS[:max(0, vt_rel_cap)]:
+        steps.append(("virustotal", "get_domain_relationship",
+                      {"domain": v, "relationship": rel, "limit": 40}))
+    steps += [
+        ("contrastapi", "domain_report", {"domain": v}),           # WHOIS/SSL/DNS/поддомены
+        ("vulneramcp", "recon.subfinder", {"domain": v, "silent": True}),  # пассивные поддомены
+        ("directapi", "rdap_domain", {"domain": v}),               # регистрация/NS/статусы
+        ("directapi", "crtsh", {"domain": v}),                     # CT-поддомены (best-effort)
+        ("directapi", "dns_records", {"domain": v}),               # A/MX/NS/TXT + SPF/DMARC
+        ("directapi", "whois_history", {"domain": v}),             # WhoisXML (ключ) — история
+        ("directapi", "censys_domain", {"domain": v}),             # Censys (ключ) — инфраструктура
+    ]
+    return steps
+
+
+def deep_ip_steps(v: str, vt_rel_cap: int) -> list[tuple[str, str, dict]]:
+    """Батарея вызовов для глубокого досье по IP."""
+    steps: list[tuple[str, str, dict]] = [
+        ("shodan", "ip_lookup", {"ip": v}),
+        ("virustotal", "get_ip_report", {"ip": v}),
+        ("directapi", "rdap_ip", {"ip": v}),                       # сеть/AS/организация
+        ("directapi", "censys_host", {"ip": v}),                   # Censys (ключ) — порты/сервисы
+    ]
+    for rel in ["resolutions", "communicating_files"][:max(0, vt_rel_cap)]:
+        steps.append(("virustotal", "get_ip_relationship",
+                      {"ip": v, "relationship": rel, "limit": 40}))
+    return steps
+
+
+def deep_company_steps(name: str) -> list[tuple[str, str, dict]]:
+    """Батарея вызовов «корпоративного» слоя досье по компании (юр. идентичность,
+    структура, должностные лица, санкции, отчётность). Инфраструктурный слой
+    (домены → deep_domain_steps) добавляется отдельно в server.py после резолвинга
+    доменов. Серверы не из каталога пропускаются в build_plan."""
+    # Прим.: filingfirehose (SEC 8-K) НЕ включаем — его search_8k_filings отдаёт
+    # свежие отчёты ПО РЫНКУ, а не по конкретной компании (был бы шум чужих эмитентов).
+    return [
+        ("directapi", "gleif_entity", {"query": name}),            # LEI: идентичность + связи
+        # opencorporates_officers здесь НЕ зовём: без юрисдикции одно и то же имя
+        # ловит чужую регистрацию (INDRA SISTEMAS есть и в ES, и в ca_qc). Его
+        # вызывает вторая волна в server.py — по ЮРИДИЧЕСКОМУ имени и стране из GLEIF.
+        ("companyscope", "lookup_company", {"query": name}),        # сводка из открытых источников
+        ("checko", "search", {"by": "name", "obj": "org", "query": name}),  # РФ ЕГРЮЛ (если RU)
+        ("the-stall", "sanctions-screening", {"name": name, "type": "entity"}),  # санкции OFAC
+    ]
 
 # Предпочтительный порядок серверов на тип цели (curated сначала). Ограничивает
 # веер, чтобы не звать каждый сервер и не плодить ошибки платных без ключа.
@@ -266,13 +373,15 @@ CURATED: dict[tuple[str, str], tuple[str, object]] = {
 PREFERRED: dict[str, list[str]] = {
     "username": ["maigret"],            # единственный источник; ~60с (docker run)
     "email": ["maigret", "openosint"],  # openosint(holehe) быстрый
-    "domain": ["shodan", "virustotal"], # быстрые API: порты/сервисы + репутация
-    "ip": ["shodan", "virustotal"],
+    # domain/ip в авто-режиме идут ГЛУБОКИМ веером (deep_domain_steps/deep_ip_steps
+    # в server.py). PREFERRED здесь — фолбэк на случай выключенного deep-режима.
+    "domain": ["shodan", "virustotal", "directapi"],
+    "ip": ["shodan", "virustotal", "directapi"],
     "url": ["virustotal"],
     "hash": ["virustotal"],
     "phone": ["contrastapi"],
     "inn": ["checko"],
-    "company": ["checko"],              # ЕГРЮЛ/ЕГРИП; быстрый и точный
+    "company": ["checko", "directapi"],  # ЕГРЮЛ/ЕГРИП (RU) + GLEIF (глобальный реестр LEI)
     "ticker": ["stockscope", "the-stall"],  # оба API; the-stall даёт данные
     "crypto": ["twzrd"],                # Solana intel-score
     "query": ["datanexus", "bgpt"],     # быстрый общий поиск

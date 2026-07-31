@@ -1,7 +1,26 @@
+# --- secrets / local config (NEVER commit) ---
 .env
+.env.*
+!.env.example
+.claude/
+*.key
+*.pem
+
+# --- generated OSINT reports (may contain PII) ---
+reports/
+*.pdf
+
+# --- reference/target dossiers (PII, do not distribute) ---
+INDRA SISTEMAS*.html
+*.dossier.html
+
+# --- python / build ---
 __pycache__/
 *.pyc
 .venv/
 venv/
-reports/
-*.pdf
+*.egg-info/
+
+# --- misc ---
+.DS_Store
+scratchpad/

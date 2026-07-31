@@ -28,7 +28,10 @@ services:
     environment:
       MCP_SERVER_ID: "orchestrator"
       LITELLM_BASE_URL: "http://litellm:4000/v1"
-      ORCHESTRATOR_MODEL: "GigaChat-2-Pro"
+      ORCHESTRATOR_MODEL: "${ORCHESTRATOR_MODEL:-GigaChat-2-Pro}"
+      ORCHESTRATOR_REPORT_MODEL: "${ORCHESTRATOR_REPORT_MODEL:-GigaChat-2-Pro}"
+      ORCHESTRATOR_DOMAIN_DEEP: "${ORCHESTRATOR_DOMAIN_DEEP:-1}"
+      ORCHESTRATOR_VT_RELATIONSHIPS: "${ORCHESTRATOR_VT_RELATIONSHIPS:-4}"
       LITELLM_MASTER_KEY: "${LITELLM_MASTER_KEY}"
       REPORTS_DIR: "/reports"
       REPORTS_URL_BASE: "http://localhost:8899"
@@ -157,6 +160,36 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+  directapi:
+    build:
+      context: .
+      dockerfile: servers/directapi/Dockerfile
+      args:
+        BASE_IMAGE: osint-mcp-base:latest
+    image: osint-mcp-directapi:latest
+    restart: unless-stopped
+    # supergateway публикует stdio-сервер как Streamable HTTP на :8000/mcp
+    # (современный транспорт MCP, надёжнее устаревшего SSE). --stateful держит
+    # процесс-сервер живым между запросами. /healthz отдаёт 200 сразу.
+    command: >
+      supergateway --stdio "python /app/server.py"
+      --outputTransport streamableHttp --port 8000
+      --streamableHttpPath /mcp --stateful
+      --healthEndpoint /healthz
+    environment:
+      MCP_SERVER_ID: "directapi"
+      CENSYS_PAT: "${CENSYS_PAT:-}"
+      CENSYS_ORG_ID: "${CENSYS_ORG_ID:-}"
+      WHOISXML_API_KEY: "${WHOISXML_API_KEY:-}"
+      OPENCORPORATES_API_KEY: "${OPENCORPORATES_API_KEY:-}"
+    networks:
+      - osint
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -qO- http://localhost:8000/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
   brightdata:
     build:
       context: .
@@ -223,7 +256,7 @@ services:
     # (современный транспорт MCP, надёжнее устаревшего SSE). --stateful держит
     # процесс-сервер живым между запросами. /healthz отдаёт 200 сразу.
     command: >
-      supergateway --stdio "uvx checko-mcp"
+      supergateway --stdio "uvx --with 'mcp==1.15.0' checko-mcp"
       --outputTransport streamableHttp --port 8000
       --streamableHttpPath /mcp --stateful
       --healthEndpoint /healthz

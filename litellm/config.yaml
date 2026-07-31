@@ -67,6 +67,21 @@ model_list:
       model: openai/gpt-4o-mini
       api_key: os.environ/OPENAI_API_KEY
 
+  # ----------------------- Китайские модели (опционально) ----------------
+  # DeepSeek — сильный аналитический писатель по низкой цене; первичный «средний»
+  # уровень для ORCHESTRATOR_REPORT_MODEL между GigaChat и Claude/GPT. Работает при
+  # заданном DEEPSEEK_API_KEY. Swap на Qwen (dashscope/) или GLM (zhipu/) — по
+  # аналогии, ещё один блок model_name.
+  - model_name: deepseek-chat
+    litellm_params:
+      model: deepseek/deepseek-chat
+      api_key: os.environ/DEEPSEEK_API_KEY
+
+  - model_name: deepseek-reasoner
+    litellm_params:
+      model: deepseek/deepseek-reasoner
+      api_key: os.environ/DEEPSEEK_API_KEY
+
   # --------------------- Локально через Ollama (ОПЦИОНАЛЬНО) --------------
   # Модели зарегистрированы всегда, но отвечают только когда Ollama запущена
   # (профиль local-llm в compose, либо своя Ollama на хосте + OLLAMA_BASE_URL).

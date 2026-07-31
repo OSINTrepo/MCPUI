@@ -34,7 +34,16 @@ servers:
     stdio_command: "python /app/server.py"
     env:
       LITELLM_BASE_URL: "http://litellm:4000/v1"
-      ORCHESTRATOR_MODEL: "GigaChat-2-Pro"
+      # Модель подбора серверов и модель-писатель отчёта — из .env (по умолчанию
+      # GigaChat). REPORT_MODEL меняют на deepseek-chat / claude-opus-4-8 для
+      # аналитически более сильного и точного досье.
+      ORCHESTRATOR_MODEL: "${ORCHESTRATOR_MODEL:-GigaChat-2-Pro}"
+      ORCHESTRATOR_REPORT_MODEL: "${ORCHESTRATOR_REPORT_MODEL:-GigaChat-2-Pro}"
+      ORCHESTRATOR_DOMAIN_DEEP: "${ORCHESTRATOR_DOMAIN_DEEP:-1}"
+      # 4 связи VT: resolutions, subdomains, historical_ssl_certificates,
+      # communicating_files. historical_whois (5-я) не берём — историю регистрации
+      # точнее и полнее отдаёт WhoisXML (directapi.whois_history).
+      ORCHESTRATOR_VT_RELATIONSHIPS: "${ORCHESTRATOR_VT_RELATIONSHIPS:-4}"
       LITELLM_MASTER_KEY: "${LITELLM_MASTER_KEY}"
       REPORTS_DIR: "/reports"
       REPORTS_URL_BASE: "http://localhost:8899"   # адрес reports-сервиса (см. docker-compose.yml)
@@ -198,6 +207,31 @@ servers:
     # (см. mcp.json в репозитории) — работает без ключа, 55 инструментов.
     enabled: true
 
+  - id: directapi
+    category: network
+    display_name: Direct Lookups
+    description: "Прямые публичные API без ключа: RDAP (whois), crt.sh (поддомены), DNS/SPF/DMARC/DKIM, GLEIF и OpenCorporates (реестр компаний и должностных лиц). Плюс Censys/WhoisXML при наличии ключей. Дай домен, IP или название компании."
+    transport: stdio
+    install: docker
+    build: servers/directapi          # Dockerfile внутри; контекст сборки — корень репо
+    # Опциональные платные ключи из .env. Hosted-MCP вендоров не подошли (Censys —
+    # два заголовка PAT+Org, WhoisXML — интерактивный OAuth, OpenCorporates —
+    # только REST), поэтому их REST обёрнут внутри directapi. Пусто → инструменты
+    # отвечают «нужен ключ».
+    stdio_command: "python /app/server.py"
+    env:
+      CENSYS_PAT: "${CENSYS_PAT:-}"
+      CENSYS_ORG_ID: "${CENSYS_ORG_ID:-}"
+      WHOISXML_API_KEY: "${WHOISXML_API_KEY:-}"
+      OPENCORPORATES_API_KEY: "${OPENCORPORATES_API_KEY:-}"
+    auth:
+      type: none
+      user_var: null
+    cost_tier: free
+    inputs: [domain, ip, company, inn]
+    repo: local
+    enabled: true
+
   # ----------------------------- Web Scraping ------------------------------
   - id: brightdata
     category: scraping
@@ -277,7 +311,10 @@ servers:
     transport: stdio
     install: docker
     build: servers/checko
-    stdio_command: "uvx checko-mcp"
+    # Пинуем mcp: checko-mcp 0.1.0 объявляет mcp>=1.0, а uvx тянет latest (1.28+),
+    # где убрали re-export mcp.server.Server.list_tools → сервер падал на старте
+    # («No valid session ID» на все вызовы). 1.15.0 — последняя рабочая для него.
+    stdio_command: "uvx --with 'mcp==1.15.0' checko-mcp"
     auth:
       type: api_key
       user_var: CHECKO_API_KEY

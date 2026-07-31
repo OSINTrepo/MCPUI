@@ -7,9 +7,17 @@ initialize -> notifications/initialized -> tools/list | tools/call.
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 import httpx
+
+# Максимум текста, который забираем из ответа инструмента. Было жёстко 4000 —
+# и это молча резало САМЫЕ богатые источники: списки поддоменов/сертификатов VT,
+# карточку должностных лиц OpenCorporates (40 записей ≈ 6 КБ) и т.п. Именно из
+# этого текста детерминированно строятся таблицы досье, поэтому обрезка = потеря
+# данных в отчёте. Ниже по конвейеру свои лимиты (отчёт 12000, LLM 3500).
+MAX_TEXT = int(os.environ.get("ORCHESTRATOR_MAX_TOOL_TEXT", "20000"))
 
 _ACCEPT = "application/json, text/event-stream"
 _UA = "osint-orchestrator/1.0"
@@ -95,4 +103,4 @@ class MCPClient:
         res = data.get("result", {})
         text = " ".join(c.get("text", "") for c in res.get("content", [])
                         if isinstance(c, dict) and c.get("type") == "text")
-        return {"ok": not res.get("isError", False), "text": text[:4000], "raw": res}
+        return {"ok": not res.get("isError", False), "text": text[:MAX_TEXT], "raw": res}

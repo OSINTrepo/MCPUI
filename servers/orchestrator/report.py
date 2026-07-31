@@ -83,8 +83,13 @@ def _source_section(r: dict) -> tuple[str, int]:
     return head + body, len(links)
 
 
-def build_markdown(task: str, results: list[dict], when: str) -> tuple[str, dict]:
-    """Полный отчёт + метаданные {links_total, ok, total}."""
+def build_markdown(task: str, results: list[dict], when: str,
+                   synthesis: str | None = None) -> tuple[str, dict]:
+    """Полный отчёт + метаданные {links_total, ok, total}.
+
+    synthesis (если задан) — аналитическое досье от сильной модели: идёт главным
+    телом, а сырые данные источников уходят в приложение. Без синтеза — прежний
+    детерминированный формат (Сводка/Подробности)."""
     names = ", ".join(sorted({r.get("name", r["server"]) for r in results})) or "—"
     ok = [r for r in results if r.get("ok")]
     md = [f"# 🕵️ OSINT-досье", "",
@@ -92,21 +97,32 @@ def build_markdown(task: str, results: list[dict], when: str) -> tuple[str, dict
           f"**Источники:** {names}  ",
           f"**Успешно опрошено:** {len(ok)} из {len(results)}", "", "---", ""]
 
-    # Сводка
-    md += ["## Сводка", ""]
+    # Считаем ссылки и готовим секции сырых данных в любом случае.
     sections = []
     links_total = 0
     for r in results:
         sec, n = _source_section(r)
         sections.append(sec)
         links_total += n
-        if r.get("ok"):
-            extra = f" — {n} ссылок" if n else ""
-            md.append(f"- **{r.get('name', r['server'])}**{extra}")
-    if not ok:
-        md.append("- Значимых находок нет (источники не вернули данных).")
-    md += ["", "---", "", "## Подробности", ""]
-    md += sections
+
+    if synthesis:
+        # Главное тело — аналитическое досье; сырьё — в приложении.
+        md += [synthesis.strip(), "", "---", "",
+               "## Приложение: данные источников", "",
+               "_Сырые ответы инструментов — для проверки выводов выше._", ""]
+        md += sections
+    else:
+        # Фолбэк без LLM: прежний детерминированный формат.
+        md += ["## Сводка", ""]
+        for r in results:
+            if r.get("ok"):
+                sec_n = extract_links(r.get("text", "") or "")
+                extra = f" — {len(sec_n)} ссылок" if sec_n else ""
+                md.append(f"- **{r.get('name', r['server'])}**{extra}")
+        if not ok:
+            md.append("- Значимых находок нет (источники не вернули данных).")
+        md += ["", "---", "", "## Подробности", ""]
+        md += sections
 
     # Таблица источников
     md += ["", "---", "", "## Источники и статусы", "",
@@ -165,10 +181,11 @@ def slugify(task: str) -> str:
 
 
 def save_report(task: str, results: list[dict], when: str,
-                reports_dir: str, url_base: str) -> dict:
+                reports_dir: str, url_base: str,
+                synthesis: str | None = None) -> dict:
     """Пишет .md (+ .pdf best-effort). Возвращает {md_url, pdf_url, meta, markdown}."""
     os.makedirs(reports_dir, exist_ok=True)
-    md_text, meta = build_markdown(task, results, when)
+    md_text, meta = build_markdown(task, results, when, synthesis)
     slug = slugify(task)
     md_path = os.path.join(reports_dir, f"{slug}.md")
     with open(md_path, "w", encoding="utf-8") as fh:

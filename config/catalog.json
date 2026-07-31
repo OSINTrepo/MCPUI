@@ -112,6 +112,25 @@
     "repo": "https://github.com/UPinar/contrastapi"
   },
   {
+    "id": "directapi",
+    "display_name": "Direct Lookups",
+    "category": "network",
+    "description": "Прямые публичные API без ключа: RDAP (whois), crt.sh (поддомены), DNS/SPF/DMARC/DKIM, GLEIF и OpenCorporates (реестр компаний и должностных лиц). Плюс Censys/WhoisXML при наличии ключей. Дай домен, IP или название компании.",
+    "cost_tier": "free",
+    "transport": "stdio",
+    "endpoint": "http://directapi:8000/mcp",
+    "inputs": [
+      "domain",
+      "ip",
+      "company",
+      "inn"
+    ],
+    "requires_key": false,
+    "key_var": null,
+    "status": "ready",
+    "repo": "local"
+  },
+  {
     "id": "brightdata",
     "display_name": "Bright Data",
     "category": "scraping",

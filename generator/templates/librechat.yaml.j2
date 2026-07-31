@@ -52,17 +52,18 @@ endpoints:
       # реально 32k — не грузите в них десятки инструментов сразу.)
       maxContextTokens: 128000
 
-    - name: "Cloud (Claude/GPT via LiteLLM)"
+    - name: "Cloud (Claude/GPT/DeepSeek via LiteLLM)"
       apiKey: "${LITELLM_MASTER_KEY}"
       baseURL: "http://litellm:4000/v1"
       models:
-        default: ["claude-opus-4-8", "claude-sonnet-5", "gpt-4o", "gpt-4o-mini"]
+        default: ["deepseek-chat", "deepseek-reasoner", "claude-opus-4-8", "claude-sonnet-5", "gpt-4o", "gpt-4o-mini"]
         fetch: false
       titleConvo: true
       titleModel: "gpt-4o-mini"
       modelDisplayLabel: "Cloud"
-      # Работает только когда в .env задан ANTHROPIC_API_KEY / OPENAI_API_KEY.
-      maxContextTokens: 200000
+      # Работает только когда в .env задан соответствующий ключ:
+      # DEEPSEEK_API_KEY / ANTHROPIC_API_KEY / OPENAI_API_KEY.
+      maxContextTokens: 128000
 
     # Локальная модель — ОПЦИОНАЛЬНА. Эндпоинт остаётся в UI, но отвечает только
     # когда поднят профиль local-llm (docker compose --profile local-llm up -d
@@ -110,12 +111,23 @@ modelSpecs:
     # Те же агентные пресеты, но на облачных/локальной LLM (нужен их ключ в .env
     # или запущенный Ollama). Логика та же: виден только orchestrator, он сам
     # подбирает серверы и собирает досье, чат-модель лишь показывает отчёт.
+    - name: "deepseek-osint-auto"
+      label: "DeepSeek · OSINT Авто"
+      description: "Как «Авто», но на DeepSeek — сильный писатель отчётов (нужен DEEPSEEK_API_KEY)"
+      mcpServers: ["orchestrator"]
+      preset:
+        endpoint: "Cloud (Claude/GPT/DeepSeek via LiteLLM)"
+        model: "deepseek-chat"
+        maxContextTokens: 128000
+        promptPrefix: |
+{{ system_prompt_auto | indent(width=10, first=True) }}
+
     - name: "claude-osint-auto"
       label: "Claude · OSINT Авто"
       description: "Как «Авто», но на Claude Opus 4.8 (нужен ANTHROPIC_API_KEY)"
       mcpServers: ["orchestrator"]
       preset:
-        endpoint: "Cloud (Claude/GPT via LiteLLM)"
+        endpoint: "Cloud (Claude/GPT/DeepSeek via LiteLLM)"
         model: "claude-opus-4-8"
         maxContextTokens: 200000
         promptPrefix: |
@@ -126,7 +138,7 @@ modelSpecs:
       description: "Как «Авто», но на GPT-4o (нужен OPENAI_API_KEY)"
       mcpServers: ["orchestrator"]
       preset:
-        endpoint: "Cloud (Claude/GPT via LiteLLM)"
+        endpoint: "Cloud (Claude/GPT/DeepSeek via LiteLLM)"
         model: "gpt-4o"
         maxContextTokens: 128000
         promptPrefix: |

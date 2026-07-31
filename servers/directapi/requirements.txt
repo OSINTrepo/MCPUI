@@ -1,0 +1,3 @@
+mcp==1.15.0
+httpx
+dnspython
