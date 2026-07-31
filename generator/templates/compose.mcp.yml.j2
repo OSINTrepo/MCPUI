@@ -1,0 +1,57 @@
+# =============================================================================
+# docker-compose.mcp.yml — СГЕНЕРИРОВАН из registry/servers.yaml
+# НЕ РЕДАКТИРОВАТЬ ВРУЧНУЮ. Правь registry/servers.yaml, затем:
+#   python generator/generate.py
+#
+# Один сервис на каждый включённый stdio-сервер. Каждый собирается из
+# servers/<id>/Dockerfile и оборачивается supergateway: stdio -> SSE.
+# Запуск вместе с базовым стеком:
+#   docker compose -f docker-compose.yml -f docker-compose.mcp.yml up -d
+# =============================================================================
+services:
+{% for s in servers %}
+  {{ s.id }}:
+    build:
+      context: .
+      dockerfile: {{ s.build }}/Dockerfile
+      args:
+        BASE_IMAGE: {{ s.base_image }}
+    image: osint-mcp-{{ s.id }}:latest
+    restart: unless-stopped
+    # supergateway публикует stdio-сервер как Streamable HTTP на :{{ s.sse_port }}/mcp
+    # (современный транспорт MCP, надёжнее устаревшего SSE). --stateful держит
+    # процесс-сервер живым между запросами. /healthz отдаёт 200 сразу.
+    command: >
+      supergateway --stdio "{{ s.stdio_command }}"
+      --outputTransport streamableHttp --port {{ s.sse_port }}
+      --streamableHttpPath /mcp --stateful
+      --healthEndpoint /healthz
+    environment:
+      MCP_SERVER_ID: "{{ s.id }}"
+{% if s.auth.type == 'api_key' and s.auth.user_var %}
+      # {{ s.auth.env_var }} — имя, которое читает сервер; значение из {{ s.auth.user_var }} в .env
+      {{ s.auth.env_var }}: "${{ '{' }}{{ s.auth.user_var }}:-{{ '}' }}"
+{% endif %}
+{% for k, v in (s.env or {}).items() %}
+      {{ k }}: "{{ v }}"
+{% endfor %}
+{% if s.volumes %}
+    volumes:
+{% for v in s.volumes %}
+      - "{{ v }}"
+{% endfor %}
+{% endif %}
+    networks:
+      - osint
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -qO- http://localhost:{{ s.sse_port }}/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+{% endfor %}
+
+# Сеть создаётся базовым docker-compose.yml; файлы всегда запускаются вместе.
+networks:
+  osint:
+    name: osint_net

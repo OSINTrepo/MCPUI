@@ -1,0 +1,552 @@
+# =============================================================================
+# Реестр OSINT MCP-серверов — единый источник правды (спец. §3)
+# -----------------------------------------------------------------------------
+# Из этого файла генератор (generator/generate.py) собирает:
+#   - блок mcpServers в config/librechat.yaml
+#   - сервисы в docker-compose.mcp.yml (для transport: stdio)
+#   - config/catalog.json — метаданные каталога для UI
+#
+# Добавить сервер = добавить запись сюда и запустить `python generator/generate.py`.
+# Описание полей: registry/README.md
+# =============================================================================
+
+# Значения по умолчанию (можно переопределить в записи сервера).
+defaults:
+  # SSE-порт внутри контейнера, на который supergateway публикует stdio-сервер.
+  sse_port: 8000
+  # Базовый образ для сборки stdio-серверов (node + python + uv + supergateway).
+  base_image: osint-mcp-base:latest
+
+servers:
+  # ========================= Оркестратор (агентный режим) ==================
+  # Свой MCP-сервер: фронт над всеми остальными. Отдаёт LibreChat 4 инструмента
+  # (investigate/plan/catalog/call_server), сам подбирает нужные серверы по задаче
+  # и собирает досье. Решает проблему 657 инструментов и даёт «агентное»
+  # подключение. Ручной режим (все серверы по отдельности) остаётся.
+  - id: orchestrator
+    category: meta
+    display_name: OSINT Orchestrator
+    description: "Опиши задачу — сам подберёт источники и соберёт досье."
+    server_instructions: "Для любой OSINT-задачи вызывай investigate(task=<текст пользователя>) и покажи готовый отчёт."
+    transport: stdio
+    install: docker
+    build: servers/orchestrator
+    stdio_command: "python /app/server.py"
+    env:
+      LITELLM_BASE_URL: "http://litellm:4000/v1"
+      ORCHESTRATOR_MODEL: "GigaChat-2-Pro"
+      LITELLM_MASTER_KEY: "${LITELLM_MASTER_KEY}"
+      REPORTS_DIR: "/reports"
+      REPORTS_URL_BASE: "http://localhost:8899"   # адрес reports-сервиса (см. docker-compose.yml)
+    volumes:
+      - ./config/catalog.json:/app/catalog.json:ro
+      - ./reports:/reports
+    auth:
+      type: none
+      user_var: null
+    cost_tier: free
+    inputs: [query, username, email, domain, ip, company, inn, hash, url, ticker]
+    repo: local
+    enabled: true
+
+  # ------------------------------- SOCMINT ---------------------------------
+  - id: maigret
+    category: socmint
+    display_name: Maigret
+    description: "Ищет аккаунты по нику или почте на 3000+ сайтах и в соцсетях. Дай username или email."
+    # Подсказка модели (serverInstructions): maigret медленный без сужения.
+    server_instructions: "Всегда вызывай search_username с tags:['social'], иначе запрос уходит в таймаут."
+    transport: stdio                 # stdio | http | sse
+    install: docker                  # docker | npx | uvx | pip | remote
+    build: servers/maigret           # контекст сборки (Dockerfile внутри)
+    # Команда запуска stdio-сервера ВНУТРИ контейнера (её оборачивает supergateway).
+    stdio_command: "npx -y mcp-maigret"
+    # Обёртка запускает maigret через `docker run`, поэтому нужен доступ к
+    # docker-сокету хоста, а путь отчётов должен совпадать на хосте и в контейнере.
+    env:
+      MAIGRET_REPORTS_DIR: /tmp/maigret-reports
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /tmp/maigret-reports:/tmp/maigret-reports
+    auth:
+      type: none                     # none | api_key | oauth
+      user_var: null                 # имя переменной ключа (в .env и per-user vault)
+    cost_tier: free                  # free | freemium | paid
+    inputs: [username, email]
+    repo: https://github.com/BurtTheCoder/mcp-maigret
+    enabled: true
+
+  - id: expose-team
+    category: socmint
+    display_name: Expose Team
+    description: AI-OSINT по username/email, кредитная модель
+    transport: http
+    install: remote
+    url: https://mcp.expose.team/mcp
+    auth:
+      type: api_key
+      user_var: EXPOSE_TEAM_API_KEY
+    cost_tier: paid
+    inputs: [username, email]
+    repo: https://expose.team
+    # Платный remote без ключа — не подключается. Включить после ввода ключа.
+    enabled: false
+
+  - id: xquik
+    category: socmint
+    display_name: Xquik
+    description: Извлечение данных X/Twitter, 40+ REST-эндпоинтов
+    transport: stdio
+    install: docker
+    build: servers/xquik
+    # Репозиторий не публикует npm-пакет и не содержит рабочего entrypoint —
+    # выключен до написания собственной обёртки на онбординге (спец. §10).
+    stdio_command: "node /app/dist/index.js"
+    auth:
+      type: api_key
+      user_var: XQUIK_API_KEY
+    cost_tier: paid
+    inputs: [username]
+    repo: https://github.com/Xquik-dev/x-twitter-scraper
+    enabled: false
+
+  # --------------------------- Network Scanning ----------------------------
+  - id: shodan
+    category: network
+    display_name: Shodan
+    description: "Разведка по IP и домену: открытые порты, сервисы, устройства, уязвимости (CVE). Дай IP или домен."
+    key_help: "Ключ Shodan: аккаунт на https://account.shodan.io → раздел API. Без ключа сервер не отвечает."
+    transport: stdio
+    install: docker
+    build: servers/shodan
+    stdio_command: "npx -y @burtthecoder/mcp-shodan"
+    auth:
+      type: api_key
+      user_var: SHODAN_API_KEY
+    cost_tier: paid
+    inputs: [ip, domain]
+    repo: https://github.com/BurtTheCoder/mcp-shodan
+    enabled: true
+
+  - id: zoomeye
+    category: network
+    display_name: ZoomEye
+    description: "Поиск устройств и сервисов в интернете по дорками. Дай IP, домен или запрос."
+    key_help: "Ключ ZoomEye: профиль на https://www.zoomeye.ai. Нужен положительный баланс/кредиты."
+    transport: stdio
+    install: docker
+    build: servers/zoomeye
+    stdio_command: "uvx mcp-server-zoomeye"
+    auth:
+      type: api_key
+      user_var: ZOOMEYE_API_KEY
+    cost_tier: paid
+    inputs: [ip, domain]
+    repo: https://github.com/zoomeye-ai/mcp_zoomeye
+    enabled: true
+
+  - id: dnstwist
+    category: network
+    display_name: DNSTwist
+    description: "Ищет домены-двойники (тайпсквоттинг, фишинг). Дай домен."
+    transport: stdio
+    install: docker
+    build: servers/dnstwist
+    stdio_command: "npx -y @burtthecoder/mcp-dnstwist"
+    # Обёртка запускает dnstwist через `docker run` — нужен docker-сокет хоста.
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    auth:
+      type: none
+      user_var: null
+    cost_tier: free
+    inputs: [domain]
+    repo: https://github.com/BurtTheCoder/mcp-dnstwist
+    enabled: true
+
+  - id: osint-toolkit
+    category: network
+    display_name: OSINT Toolkit
+    description: WHOIS, Nmap, DNS-lookups, детект тайпсквоттинга
+    transport: stdio
+    install: docker
+    build: servers/osint-toolkit
+    stdio_command: "node /app/index.js"
+    auth:
+      type: none
+      user_var: null
+    cost_tier: free
+    inputs: [domain, ip]
+    repo: https://www.pulsemcp.com/servers/himanshusanecha-osint-toolkit
+    enabled: false                   # неофициальный, включить после проверки обёртки
+
+  - id: contrastapi
+    category: network
+    display_name: ContrastAPI
+    description: "Разбор домена и инфраструктуры: DNS, WHOIS, SSL, поддомены, CVE, угрозы. Дай домен, IP или URL."
+    transport: http
+    install: remote
+    url: https://api.contrastcyber.com/mcp/
+    auth:
+      type: none
+      user_var: null
+    cost_tier: freemium
+    inputs: [domain, ip, url, hash, phone]
+    repo: https://github.com/UPinar/contrastapi
+    # Раньше числился невозможным по ошибке: npm-пакет `contrastapi` — это
+    # клиентский SDK (нет bin). Но у проекта есть официальный hosted-эндпоинт
+    # (см. mcp.json в репозитории) — работает без ключа, 55 инструментов.
+    enabled: true
+
+  # ----------------------------- Web Scraping ------------------------------
+  - id: brightdata
+    category: scraping
+    display_name: Bright Data
+    description: "Веб-поиск и выгрузка контента сайтов с обходом защит. Дай ссылку или запрос."
+    key_help: "Токен Bright Data: https://brightdata.com → аккаунт → API tokens."
+    transport: stdio
+    install: docker
+    build: servers/brightdata
+    stdio_command: "npx -y @brightdata/mcp"
+    auth:
+      type: api_key
+      user_var: BRIGHTDATA_API_TOKEN   # имя в .env
+      env_var: API_TOKEN               # имя, которое читает сам сервер в контейнере
+    cost_tier: paid
+    inputs: [url, domain]
+    repo: https://github.com/brightdata/brightdata-mcp
+    enabled: true
+
+  - id: anysite
+    category: scraping
+    display_name: AnySite
+    description: Структурированный доступ к 115+ эндпоинтам 40+ платформ
+    transport: http
+    install: remote
+    url: https://mcp.anysite.io/mcp
+    auth:
+      type: api_key
+      user_var: ANYSITE_API_KEY
+    cost_tier: paid
+    inputs: [url, domain, username]
+    repo: https://docs.anysite.io/mcp-server/overview
+    # Требует интерактивного OAuth (браузер) — не работает headless. Ломает
+    # OAuth-редирект LibreChat. Включить только при рабочем OAuth-флоу.
+    enabled: false
+
+  # -------------------------- Company Intelligence -------------------------
+  - id: openregistry
+    category: company
+    display_name: OpenRegistry
+    description: 27 нац. корпоративных реестров (UK, FR, DE, KR, AU ...)
+    # Хостится как удалённый MCP-сервис (OAuth 2.1 magic-link), локально не поднять.
+    transport: http
+    install: remote
+    url: https://openregistry.sophymarine.com/mcp
+    auth:
+      type: none
+      user_var: null
+    cost_tier: freemium
+    inputs: [company]
+    repo: https://github.com/sophymarine/openregistry
+    # Хостится с OAuth 2.1 magic-link — интерактивный вход, не работает headless.
+    # Ломает OAuth-редирект LibreChat. Компанию-разведку закрывает checko/companyscope.
+    enabled: false
+
+  - id: companyscope
+    category: company
+    display_name: CompanyScope
+    description: "Сводка о компании из открытых источников. Дай название компании."
+    transport: stdio
+    install: docker
+    build: servers/companyscope
+    stdio_command: "npx -y companyscope-mcp"
+    auth:
+      type: none                       # агрегирует бесплатные источники, ключ не нужен
+      user_var: null
+    cost_tier: free
+    inputs: [company]
+    repo: https://github.com/Stewyboy1990/companyscope-mcp
+    enabled: true
+
+  - id: checko
+    category: company
+    display_name: Checko MCP
+    description: "Проверка компаний и ИП РФ: ЕГРЮЛ/ЕГРИП, суды, госконтракты. Дай название или ИНН."
+    key_help: "Ключ Checko: кабинет на https://checko.ru → API. Платный."
+    transport: stdio
+    install: docker
+    build: servers/checko
+    stdio_command: "uvx checko-mcp"
+    auth:
+      type: api_key
+      user_var: CHECKO_API_KEY
+    cost_tier: paid
+    inputs: [company, inn]
+    repo: https://github.com/Nymaxxx/checko-mcp
+    enabled: true
+
+  - id: stockscope
+    category: company
+    display_name: StockScope
+    description: "Финансы публичных компаний США из отчётности SEC. Дай тикер или название."
+    transport: stdio
+    install: docker
+    build: servers/stockscope
+    stdio_command: "npx -y stockscope-mcp"
+    auth:
+      type: none
+      user_var: null
+    cost_tier: free
+    inputs: [ticker, company]
+    repo: https://github.com/Stewyboy1990/companyscope-mcp
+    enabled: true
+
+  - id: us-business-data
+    category: company
+    display_name: US Business Data
+    description: Регистрации бизнеса в 17 штатах США, разрешения на строительство
+    transport: stdio
+    install: docker
+    build: servers/us-business-data
+    stdio_command: "node /app/index.js"
+    auth:
+      type: api_key
+      user_var: US_BUSINESS_DATA_API_KEY
+    cost_tier: paid
+    inputs: [company]
+    repo: https://github.com/avabuildsdata/mcp-us-business-data
+    # Нет опубликованного npm/pip-пакета + платный ключ. Нужна git-сборка обёртки.
+    enabled: false
+
+  # --------------------------- Threat Intelligence -------------------------
+  - id: virustotal
+    category: threat
+    display_name: VirusTotal
+    description: "Проверка файлов, ссылок, IP и доменов на угрозы. Дай хеш, URL, IP или домен."
+    key_help: "Ключ VirusTotal (v3): https://www.virustotal.com/gui/my-apikey (бесплатный тариф есть)."
+    transport: stdio
+    install: docker
+    build: servers/virustotal
+    stdio_command: "npx -y @burtthecoder/mcp-virustotal"
+    auth:
+      type: api_key
+      user_var: VIRUSTOTAL_API_KEY
+    cost_tier: freemium
+    inputs: [hash, url, ip, domain]
+    repo: https://github.com/BurtTheCoder/mcp-virustotal
+    enabled: true
+
+  - id: voidly
+    category: threat
+    display_name: Voidly
+    description: "Блокировки и доступность сайтов в 119+ странах. Дай домен или URL."
+    transport: stdio
+    install: docker
+    build: servers/voidly
+    stdio_command: "npx -y @voidly/mcp-server"
+    auth:
+      type: none
+      user_var: null
+    cost_tier: free
+    inputs: [domain, url]
+    repo: https://www.npmjs.com/package/@voidly/mcp-server
+    enabled: true
+
+  - id: openosint
+    category: threat
+    display_name: OpenOSINT
+    description: "Набор OSINT-проверок: почта, ник, домен, IP, утечки. Дай цель для проверки."
+    transport: stdio
+    install: docker
+    build: servers/openosint
+    # MCP-режим отдаёт 18 инструментов без LLM-ключа (ключ Anthropic нужен только
+    # для отдельного agent-режима). Часть инструментов требует опц. ключей
+    # (HIBP/SHODAN/VT) — работают и без них на доступном подмножестве.
+    stdio_command: "uvx --from openosint openosint-mcp"
+    auth:
+      type: none
+      user_var: null
+    cost_tier: free
+    inputs: [domain, ip, email, username]
+    repo: https://github.com/OpenOSINT/OpenOSINT
+    enabled: true
+
+  # ----------------------------- Meta / Discovery --------------------------
+  - id: not-human-search
+    category: meta
+    display_name: Not Human Search
+    description: "Подбор подходящего MCP-инструмента под задачу. Опиши, что нужно найти."
+    transport: http
+    install: remote
+    url: https://nothumansearch.ai/mcp
+    auth:
+      type: none
+      user_var: null
+    cost_tier: free
+    inputs: [query]
+    repo: https://nothumansearch.ai
+    enabled: true
+
+  # ================== Новые серверы из awesome-osint-mcp-servers ============
+
+  # --- Network Scanning ---
+  - id: domscan
+    category: network
+    display_name: DomScan
+    description: "Разбор домена: DNS, WHOIS, SSL, поддомены, двойники, оценка. Дай домен."
+    transport: http
+    install: remote
+    url: https://domscan.net/mcp
+    # Keyless по умолчанию (работает + 10k бесплатных кредитов/мес). Чтобы поднять
+    # лимиты ключом (dsk_...): смените auth.type на api_key и добавьте
+    # user_var: DOMSCAN_API_KEY, query_param: api_key (ключ уйдёт в URL ?api_key=).
+    auth:
+      type: none
+      user_var: null
+    cost_tier: freemium
+    inputs: [domain]
+    repo: https://domscan.net
+    enabled: true
+
+  - id: crawlgraph
+    category: network
+    display_name: CrawlGraph
+    description: "Кто ссылается на сайт (входящие ссылки), без сканирования цели. Дай домен."
+    key_help: "Бесплатный ключ CrawlGraph приходит на email: crawlgraph.com/docs/api."
+    # Официальный hosted-эндпоинт вендора: тот же набор инструментов (4 из 4,
+    # имена совпадают), что и у npm-пакета, — контейнер не нужен. Аноним работает
+    # (проверено: 200 без заголовка и с любым Authorization), ключ повышает лимиты.
+    transport: http
+    install: remote
+    url: https://crawlgraph.com/mcp
+    auth:
+      type: api_key            # бесплатный ключ приходит на email
+      user_var: CRAWLGRAPH_API_KEY
+    # Проверено запросом: hosted-эндпоинт отвечает 200 без ключа (и с любым
+    # заголовком). Ключ только поднимает лимиты → бейдж 🟡, а не 🔑.
+    anonymous_ok: true
+    cost_tier: freemium
+    inputs: [domain, url]
+    repo: https://github.com/pucilpet/crawlgraph-mcp
+    enabled: true
+
+  # --- Company Intelligence ---
+  - id: filingfirehose
+    category: company
+    display_name: FilingFirehose
+    description: "Свежие отчёты компаний США в SEC (8-K/13D) и риски. Дай тикер или название."
+    transport: http
+    install: remote
+    url: https://filingfirehose.com/mcp
+    auth:
+      type: none
+      user_var: null
+    cost_tier: freemium
+    inputs: [ticker, company]
+    repo: https://filingfirehose.com/mcp
+    enabled: true
+
+  # --- Public Records & Compliance ---
+  - id: datanexus
+    category: records
+    display_name: DataNexus
+    description: "Публичные записи: патенты, госконтракты, НКО, лицензии, CVE. Дай домен, компанию или запрос."
+    transport: http
+    install: remote
+    url: https://datanexusmcp.com/mcp
+    # Анонимно по умолчанию (100 вызовов/мес). Чтобы поднять лимиты ключом (dnx_...):
+    # смените auth.type на api_key, добавьте user_var: DATANEXUS_API_KEY,
+    # header: X-DataNexus-Key, scheme: "" (без префикса Bearer).
+    auth:
+      type: none
+      user_var: null
+    cost_tier: freemium
+    inputs: [domain, company, query]
+    repo: https://datanexusmcp.com
+    enabled: true
+
+  # --- Threat Intelligence ---
+  - id: vulneramcp
+    category: threat
+    display_name: VulneraMCP
+    description: "Разведка и проверки уязвимостей веб-приложений (для авторизованного пентеста). Дай URL или домен."
+    transport: stdio
+    install: docker
+    build: servers/vulneramcp
+    stdio_command: "node /app/dist/index.js"
+    auth:
+      type: none              # опц. Caido/ZAP/PostgreSQL для расширенных функций
+      user_var: null
+    cost_tier: free
+    inputs: [url, domain]
+    repo: https://github.com/telmon95/VulneraMCP
+    enabled: true
+
+  # --- Research Intelligence ---
+  - id: bgpt
+    category: research
+    display_name: BGPT
+    description: "Поиск научных статей с фактами и оценкой доказательности. Дай тему или утверждение."
+    transport: http                 # streamable-http эндпоинт (совместим и с оркестратором)
+    install: remote
+    url: https://bgpt.pro/mcp/stream
+    auth:
+      type: none              # free 50 результатов без ключа
+      user_var: null
+    cost_tier: freemium
+    inputs: [query]
+    repo: https://bgpt.pro/mcp/
+    enabled: true
+
+  # --- Blockchain Intelligence ---
+  - id: twzrd
+    category: blockchain
+    display_name: TWZRD Agent Intel
+    description: "Блокчейн-OSINT и trust-скоринг AI-агентов (Solana). Дай адрес или запрос."
+    transport: http
+    install: remote
+    url: https://intel.twzrd.xyz/mcp
+    auth:
+      type: none              # free-инструменты без оплаты; 1 инструмент — x402
+      user_var: null
+    cost_tier: freemium
+    inputs: [query]
+    repo: https://intel.twzrd.xyz
+    enabled: true
+
+  - id: the-stall
+    category: blockchain
+    display_name: The Stall
+    description: "Блокчейн-OSINT: санкции OFAC, риск кошельков, транзакции (платно). Дай адрес или запрос."
+    transport: http
+    install: remote
+    url: https://the-stall.intuitek.ai/mcp
+    auth:
+      type: none              # /catalog бесплатен; реальные вызовы — x402/Stripe
+      user_var: null
+    cost_tier: paid
+    inputs: [query]
+    repo: https://github.com/thebrierfox/the-stall
+    enabled: true
+
+  # --- Market & Trading ---
+  - id: helium
+    category: market
+    display_name: Helium
+    description: "Оценка предвзятости новостей и рыночные данные. Дай источник, тикер или тему."
+    transport: http
+    install: remote
+    url: https://heliumtrades.com/mcp
+    auth:
+      type: none              # free 50 запросов без ключа
+      user_var: null
+    cost_tier: freemium
+    inputs: [query]
+    repo: https://heliumtrades.com/mcp-page/
+    enabled: true
+
+  # --- Не MCP-сервер (для учёта полноты каталога) ---
+  # osint-agent-skills (github.com/frangelbarrera/osint-agent-skills) — это база
+  # знаний (методологии, реестры инструментов, шаблоны отчётов), а НЕ MCP-сервер.
+  # Не подключается как сервер; используется как справочные материалы.

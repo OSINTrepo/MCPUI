@@ -1,0 +1,401 @@
+[
+  {
+    "id": "orchestrator",
+    "display_name": "OSINT Orchestrator",
+    "category": "meta",
+    "description": "Опиши задачу — сам подберёт источники и соберёт досье.",
+    "cost_tier": "free",
+    "transport": "stdio",
+    "endpoint": "http://orchestrator:8000/mcp",
+    "inputs": [
+      "query",
+      "username",
+      "email",
+      "domain",
+      "ip",
+      "company",
+      "inn",
+      "hash",
+      "url",
+      "ticker"
+    ],
+    "requires_key": false,
+    "key_var": null,
+    "status": "ready",
+    "repo": "local"
+  },
+  {
+    "id": "maigret",
+    "display_name": "Maigret",
+    "category": "socmint",
+    "description": "Ищет аккаунты по нику или почте на 3000+ сайтах и в соцсетях. Дай username или email.",
+    "cost_tier": "free",
+    "transport": "stdio",
+    "endpoint": "http://maigret:8000/mcp",
+    "inputs": [
+      "username",
+      "email"
+    ],
+    "requires_key": false,
+    "key_var": null,
+    "status": "ready",
+    "repo": "https://github.com/BurtTheCoder/mcp-maigret"
+  },
+  {
+    "id": "shodan",
+    "display_name": "Shodan",
+    "category": "network",
+    "description": "Разведка по IP и домену: открытые порты, сервисы, устройства, уязвимости (CVE). Дай IP или домен.",
+    "cost_tier": "paid",
+    "transport": "stdio",
+    "endpoint": "http://shodan:8000/mcp",
+    "inputs": [
+      "ip",
+      "domain"
+    ],
+    "requires_key": true,
+    "key_var": "SHODAN_API_KEY",
+    "status": "needs_key",
+    "repo": "https://github.com/BurtTheCoder/mcp-shodan"
+  },
+  {
+    "id": "zoomeye",
+    "display_name": "ZoomEye",
+    "category": "network",
+    "description": "Поиск устройств и сервисов в интернете по дорками. Дай IP, домен или запрос.",
+    "cost_tier": "paid",
+    "transport": "stdio",
+    "endpoint": "http://zoomeye:8000/mcp",
+    "inputs": [
+      "ip",
+      "domain"
+    ],
+    "requires_key": true,
+    "key_var": "ZOOMEYE_API_KEY",
+    "status": "needs_key",
+    "repo": "https://github.com/zoomeye-ai/mcp_zoomeye"
+  },
+  {
+    "id": "dnstwist",
+    "display_name": "DNSTwist",
+    "category": "network",
+    "description": "Ищет домены-двойники (тайпсквоттинг, фишинг). Дай домен.",
+    "cost_tier": "free",
+    "transport": "stdio",
+    "endpoint": "http://dnstwist:8000/mcp",
+    "inputs": [
+      "domain"
+    ],
+    "requires_key": false,
+    "key_var": null,
+    "status": "ready",
+    "repo": "https://github.com/BurtTheCoder/mcp-dnstwist"
+  },
+  {
+    "id": "contrastapi",
+    "display_name": "ContrastAPI",
+    "category": "network",
+    "description": "Разбор домена и инфраструктуры: DNS, WHOIS, SSL, поддомены, CVE, угрозы. Дай домен, IP или URL.",
+    "cost_tier": "freemium",
+    "transport": "http",
+    "endpoint": "https://api.contrastcyber.com/mcp/",
+    "inputs": [
+      "domain",
+      "ip",
+      "url",
+      "hash",
+      "phone"
+    ],
+    "requires_key": false,
+    "key_var": null,
+    "status": "ready",
+    "repo": "https://github.com/UPinar/contrastapi"
+  },
+  {
+    "id": "brightdata",
+    "display_name": "Bright Data",
+    "category": "scraping",
+    "description": "Веб-поиск и выгрузка контента сайтов с обходом защит. Дай ссылку или запрос.",
+    "cost_tier": "paid",
+    "transport": "stdio",
+    "endpoint": "http://brightdata:8000/mcp",
+    "inputs": [
+      "url",
+      "domain"
+    ],
+    "requires_key": true,
+    "key_var": "BRIGHTDATA_API_TOKEN",
+    "status": "needs_key",
+    "repo": "https://github.com/brightdata/brightdata-mcp"
+  },
+  {
+    "id": "companyscope",
+    "display_name": "CompanyScope",
+    "category": "company",
+    "description": "Сводка о компании из открытых источников. Дай название компании.",
+    "cost_tier": "free",
+    "transport": "stdio",
+    "endpoint": "http://companyscope:8000/mcp",
+    "inputs": [
+      "company"
+    ],
+    "requires_key": false,
+    "key_var": null,
+    "status": "ready",
+    "repo": "https://github.com/Stewyboy1990/companyscope-mcp"
+  },
+  {
+    "id": "checko",
+    "display_name": "Checko MCP",
+    "category": "company",
+    "description": "Проверка компаний и ИП РФ: ЕГРЮЛ/ЕГРИП, суды, госконтракты. Дай название или ИНН.",
+    "cost_tier": "paid",
+    "transport": "stdio",
+    "endpoint": "http://checko:8000/mcp",
+    "inputs": [
+      "company",
+      "inn"
+    ],
+    "requires_key": true,
+    "key_var": "CHECKO_API_KEY",
+    "status": "needs_key",
+    "repo": "https://github.com/Nymaxxx/checko-mcp"
+  },
+  {
+    "id": "stockscope",
+    "display_name": "StockScope",
+    "category": "company",
+    "description": "Финансы публичных компаний США из отчётности SEC. Дай тикер или название.",
+    "cost_tier": "free",
+    "transport": "stdio",
+    "endpoint": "http://stockscope:8000/mcp",
+    "inputs": [
+      "ticker",
+      "company"
+    ],
+    "requires_key": false,
+    "key_var": null,
+    "status": "ready",
+    "repo": "https://github.com/Stewyboy1990/companyscope-mcp"
+  },
+  {
+    "id": "virustotal",
+    "display_name": "VirusTotal",
+    "category": "threat",
+    "description": "Проверка файлов, ссылок, IP и доменов на угрозы. Дай хеш, URL, IP или домен.",
+    "cost_tier": "freemium",
+    "transport": "stdio",
+    "endpoint": "http://virustotal:8000/mcp",
+    "inputs": [
+      "hash",
+      "url",
+      "ip",
+      "domain"
+    ],
+    "requires_key": true,
+    "key_var": "VIRUSTOTAL_API_KEY",
+    "status": "needs_key",
+    "repo": "https://github.com/BurtTheCoder/mcp-virustotal"
+  },
+  {
+    "id": "voidly",
+    "display_name": "Voidly",
+    "category": "threat",
+    "description": "Блокировки и доступность сайтов в 119+ странах. Дай домен или URL.",
+    "cost_tier": "free",
+    "transport": "stdio",
+    "endpoint": "http://voidly:8000/mcp",
+    "inputs": [
+      "domain",
+      "url"
+    ],
+    "requires_key": false,
+    "key_var": null,
+    "status": "ready",
+    "repo": "https://www.npmjs.com/package/@voidly/mcp-server"
+  },
+  {
+    "id": "openosint",
+    "display_name": "OpenOSINT",
+    "category": "threat",
+    "description": "Набор OSINT-проверок: почта, ник, домен, IP, утечки. Дай цель для проверки.",
+    "cost_tier": "free",
+    "transport": "stdio",
+    "endpoint": "http://openosint:8000/mcp",
+    "inputs": [
+      "domain",
+      "ip",
+      "email",
+      "username"
+    ],
+    "requires_key": false,
+    "key_var": null,
+    "status": "ready",
+    "repo": "https://github.com/OpenOSINT/OpenOSINT"
+  },
+  {
+    "id": "not-human-search",
+    "display_name": "Not Human Search",
+    "category": "meta",
+    "description": "Подбор подходящего MCP-инструмента под задачу. Опиши, что нужно найти.",
+    "cost_tier": "free",
+    "transport": "http",
+    "endpoint": "https://nothumansearch.ai/mcp",
+    "inputs": [
+      "query"
+    ],
+    "requires_key": false,
+    "key_var": null,
+    "status": "ready",
+    "repo": "https://nothumansearch.ai"
+  },
+  {
+    "id": "domscan",
+    "display_name": "DomScan",
+    "category": "network",
+    "description": "Разбор домена: DNS, WHOIS, SSL, поддомены, двойники, оценка. Дай домен.",
+    "cost_tier": "freemium",
+    "transport": "http",
+    "endpoint": "https://domscan.net/mcp",
+    "inputs": [
+      "domain"
+    ],
+    "requires_key": false,
+    "key_var": null,
+    "status": "ready",
+    "repo": "https://domscan.net"
+  },
+  {
+    "id": "crawlgraph",
+    "display_name": "CrawlGraph",
+    "category": "network",
+    "description": "Кто ссылается на сайт (входящие ссылки), без сканирования цели. Дай домен.",
+    "cost_tier": "freemium",
+    "transport": "http",
+    "endpoint": "https://crawlgraph.com/mcp",
+    "inputs": [
+      "domain",
+      "url"
+    ],
+    "requires_key": true,
+    "key_var": "CRAWLGRAPH_API_KEY",
+    "status": "needs_key",
+    "repo": "https://github.com/pucilpet/crawlgraph-mcp"
+  },
+  {
+    "id": "filingfirehose",
+    "display_name": "FilingFirehose",
+    "category": "company",
+    "description": "Свежие отчёты компаний США в SEC (8-K/13D) и риски. Дай тикер или название.",
+    "cost_tier": "freemium",
+    "transport": "http",
+    "endpoint": "https://filingfirehose.com/mcp",
+    "inputs": [
+      "ticker",
+      "company"
+    ],
+    "requires_key": false,
+    "key_var": null,
+    "status": "ready",
+    "repo": "https://filingfirehose.com/mcp"
+  },
+  {
+    "id": "datanexus",
+    "display_name": "DataNexus",
+    "category": "records",
+    "description": "Публичные записи: патенты, госконтракты, НКО, лицензии, CVE. Дай домен, компанию или запрос.",
+    "cost_tier": "freemium",
+    "transport": "http",
+    "endpoint": "https://datanexusmcp.com/mcp",
+    "inputs": [
+      "domain",
+      "company",
+      "query"
+    ],
+    "requires_key": false,
+    "key_var": null,
+    "status": "ready",
+    "repo": "https://datanexusmcp.com"
+  },
+  {
+    "id": "vulneramcp",
+    "display_name": "VulneraMCP",
+    "category": "threat",
+    "description": "Разведка и проверки уязвимостей веб-приложений (для авторизованного пентеста). Дай URL или домен.",
+    "cost_tier": "free",
+    "transport": "stdio",
+    "endpoint": "http://vulneramcp:8000/mcp",
+    "inputs": [
+      "url",
+      "domain"
+    ],
+    "requires_key": false,
+    "key_var": null,
+    "status": "ready",
+    "repo": "https://github.com/telmon95/VulneraMCP"
+  },
+  {
+    "id": "bgpt",
+    "display_name": "BGPT",
+    "category": "research",
+    "description": "Поиск научных статей с фактами и оценкой доказательности. Дай тему или утверждение.",
+    "cost_tier": "freemium",
+    "transport": "http",
+    "endpoint": "https://bgpt.pro/mcp/stream",
+    "inputs": [
+      "query"
+    ],
+    "requires_key": false,
+    "key_var": null,
+    "status": "ready",
+    "repo": "https://bgpt.pro/mcp/"
+  },
+  {
+    "id": "twzrd",
+    "display_name": "TWZRD Agent Intel",
+    "category": "blockchain",
+    "description": "Блокчейн-OSINT и trust-скоринг AI-агентов (Solana). Дай адрес или запрос.",
+    "cost_tier": "freemium",
+    "transport": "http",
+    "endpoint": "https://intel.twzrd.xyz/mcp",
+    "inputs": [
+      "query"
+    ],
+    "requires_key": false,
+    "key_var": null,
+    "status": "ready",
+    "repo": "https://intel.twzrd.xyz"
+  },
+  {
+    "id": "the-stall",
+    "display_name": "The Stall",
+    "category": "blockchain",
+    "description": "Блокчейн-OSINT: санкции OFAC, риск кошельков, транзакции (платно). Дай адрес или запрос.",
+    "cost_tier": "paid",
+    "transport": "http",
+    "endpoint": "https://the-stall.intuitek.ai/mcp",
+    "inputs": [
+      "query"
+    ],
+    "requires_key": false,
+    "key_var": null,
+    "status": "ready",
+    "repo": "https://github.com/thebrierfox/the-stall"
+  },
+  {
+    "id": "helium",
+    "display_name": "Helium",
+    "category": "market",
+    "description": "Оценка предвзятости новостей и рыночные данные. Дай источник, тикер или тему.",
+    "cost_tier": "freemium",
+    "transport": "http",
+    "endpoint": "https://heliumtrades.com/mcp",
+    "inputs": [
+      "query"
+    ],
+    "requires_key": false,
+    "key_var": null,
+    "status": "ready",
+    "repo": "https://heliumtrades.com/mcp-page/"
+  }
+]

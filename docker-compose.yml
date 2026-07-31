@@ -1,0 +1,166 @@
+# =============================================================================
+# Базовый стек OSINT-платформы (спец. §7)
+#   librechat   — хост + UI + агент
+#   mongodb     — пользователи, диалоги, ключи (per-user vault)
+#   meilisearch — поиск по истории
+#   litellm     — единый LLM-шлюз (GigaChat + Claude/GPT + Ollama)
+#   redis       — rate-limit / кэш (опционально, спец. §8)
+#
+# MCP-серверы описаны в docker-compose.mcp.yml (генерируется из реестра).
+# Полный запуск:
+#   docker compose -f docker-compose.yml -f docker-compose.mcp.yml up -d
+# (или ./scripts/up.sh)
+# =============================================================================
+services:
+  librechat:
+    image: ghcr.io/danny-avila/librechat:latest
+    container_name: osint-librechat
+    ports:
+      - "3080:3080"
+    env_file: .env
+    environment:
+      HOST: 0.0.0.0
+      MONGO_URI: mongodb://mongodb:27017/LibreChat
+      MEILI_HOST: http://meilisearch:7700
+      CONFIG_PATH: /app/librechat.yaml
+      # Отключаем «родные» ключевые эндпоинты — всё идёт через LiteLLM custom.
+      ENDPOINTS: custom
+    # Перед стартом проставляем дефолты UI (тёмная тема + русский язык) —
+    # LibreChat хранит их в localStorage, конфигом их не задать. Патч
+    # идемпотентный и не мешает пользователю сменить тему/язык вручную.
+    command: ["sh", "-c", "/opt/ui-defaults.sh; exec npm run backend"]
+    volumes:
+      - ./config/librechat.yaml:/app/librechat.yaml:ro
+      - ./config/system_prompt.md:/app/system_prompt.md:ro
+      - ./scripts/librechat-ui-defaults.sh:/opt/ui-defaults.sh:ro
+    depends_on:
+      - mongodb
+      - meilisearch
+      - litellm
+    networks:
+      - osint
+    restart: unless-stopped
+
+  mongodb:
+    image: mongo:7
+    container_name: osint-mongodb
+    volumes:
+      - mongo_data:/data/db
+    networks:
+      - osint
+    restart: unless-stopped
+
+  meilisearch:
+    image: getmeili/meilisearch:v1.7
+    container_name: osint-meilisearch
+    environment:
+      MEILI_NO_ANALYTICS: "true"
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-osint-dev-master-key}
+    volumes:
+      - meili_data:/meili_data
+    networks:
+      - osint
+    restart: unless-stopped
+
+  # OpenAI-совместимый прокси к GigaChat (Sber). LiteLLM ходит к нему как к
+  # обычному openai-провайдеру — так шлюз стартует независимо от доступности Sber.
+  gigachat-proxy:
+    build:
+      context: ./gigachat-proxy
+    image: osint-gigachat-proxy:latest
+    container_name: osint-gigachat-proxy
+    env_file: .env                 # GIGACHAT_CREDENTIALS, GIGACHAT_SCOPE
+    networks:
+      - osint
+    restart: unless-stopped
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    container_name: osint-litellm
+    # ENTRYPOINT образа = `litellm`; передаём только аргументы (без `sh -c`).
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--host", "0.0.0.0"]
+    ports:
+      - "4000:4000"
+    env_file: .env
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
+      LITELLM_LOCAL_MODEL_COST_MAP: "True"   # не тянуть карту цен из сети при старте
+    volumes:
+      - ./litellm/config.yaml:/app/config.yaml:ro
+    # Локальная LLM (Ollama) — ОПЦИОНАЛЬНА (профиль local-llm, см. ниже). На
+    # хосте 7.7 ГБ модель отъедает память у ~20 OSINT-серверов, поэтому по
+    # умолчанию ВЫКЛЮЧЕНА. Своя Ollama на хосте — OLLAMA_BASE_URL в .env
+    # (host-gateway ниже делает host.docker.internal резолвимым на Linux).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - gigachat-proxy
+    networks:
+      - osint
+    restart: unless-stopped
+
+  # Локальная LLM в стеке — ОПЦИОНАЛЬНО. По умолчанию НЕ запускается (профиль).
+  # Включить (на мощном хосте):
+  #   docker compose --profile local-llm up -d ollama ollama-init
+  # Модель по умолчанию — лёгкая qwen2.5:1.5b; крупнее:
+  #   docker exec osint-ollama ollama pull qwen2.5:7b
+  ollama:
+    image: ollama/ollama:latest
+    container_name: osint-ollama
+    profiles: ["local-llm"]
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - osint
+    restart: unless-stopped
+
+  # Одноразовая инициализация: дожидается ollama и тянет модель по умолчанию.
+  ollama-init:
+    image: ollama/ollama:latest
+    container_name: osint-ollama-init
+    profiles: ["local-llm"]
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - "echo 'ждём ollama...'; until ollama list >/dev/null 2>&1; do sleep 2; done;
+         echo 'тяну qwen2.5:1.5b (~1GB, один раз)...'; ollama pull qwen2.5:1.5b;
+         echo 'локальная модель готова'"
+    depends_on:
+      - ollama
+    networks:
+      - osint
+    restart: "no"
+
+  # Статическая раздача сгенерированных отчётов (.md/.pdf). Оркестратор пишет в
+  # ./reports, пользователь скачивает по http://localhost:8899/<файл>.
+  # http://localhost:8899/ — список ВСЕХ реально созданных отчётов (autoindex):
+  # так видно настоящие файлы, даже если модель в чате выдумала ссылку.
+  reports:
+    image: nginx:alpine
+    container_name: osint-reports
+    ports:
+      - "8899:80"
+    volumes:
+      - ./reports:/usr/share/nginx/html:ro
+      - ./config/reports-nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - osint
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: osint-redis
+    networks:
+      - osint
+    restart: unless-stopped
+    profiles: ["ratelimit"]   # опционально: docker compose --profile ratelimit up
+
+volumes:
+  mongo_data:
+  meili_data:
+  ollama_data:   # используется только при профиле local-llm
+
+networks:
+  osint:
+    name: osint_net

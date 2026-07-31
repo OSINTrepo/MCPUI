@@ -1,0 +1,378 @@
+# =============================================================================
+# docker-compose.mcp.yml — СГЕНЕРИРОВАН из registry/servers.yaml
+# НЕ РЕДАКТИРОВАТЬ ВРУЧНУЮ. Правь registry/servers.yaml, затем:
+#   python generator/generate.py
+#
+# Один сервис на каждый включённый stdio-сервер. Каждый собирается из
+# servers/<id>/Dockerfile и оборачивается supergateway: stdio -> SSE.
+# Запуск вместе с базовым стеком:
+#   docker compose -f docker-compose.yml -f docker-compose.mcp.yml up -d
+# =============================================================================
+services:
+  orchestrator:
+    build:
+      context: .
+      dockerfile: servers/orchestrator/Dockerfile
+      args:
+        BASE_IMAGE: osint-mcp-base:latest
+    image: osint-mcp-orchestrator:latest
+    restart: unless-stopped
+    # supergateway публикует stdio-сервер как Streamable HTTP на :8000/mcp
+    # (современный транспорт MCP, надёжнее устаревшего SSE). --stateful держит
+    # процесс-сервер живым между запросами. /healthz отдаёт 200 сразу.
+    command: >
+      supergateway --stdio "python /app/server.py"
+      --outputTransport streamableHttp --port 8000
+      --streamableHttpPath /mcp --stateful
+      --healthEndpoint /healthz
+    environment:
+      MCP_SERVER_ID: "orchestrator"
+      LITELLM_BASE_URL: "http://litellm:4000/v1"
+      ORCHESTRATOR_MODEL: "GigaChat-2-Pro"
+      LITELLM_MASTER_KEY: "${LITELLM_MASTER_KEY}"
+      REPORTS_DIR: "/reports"
+      REPORTS_URL_BASE: "http://localhost:8899"
+    volumes:
+      - "./config/catalog.json:/app/catalog.json:ro"
+      - "./reports:/reports"
+    networks:
+      - osint
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -qO- http://localhost:8000/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+  maigret:
+    build:
+      context: .
+      dockerfile: servers/maigret/Dockerfile
+      args:
+        BASE_IMAGE: osint-mcp-base:latest
+    image: osint-mcp-maigret:latest
+    restart: unless-stopped
+    # supergateway публикует stdio-сервер как Streamable HTTP на :8000/mcp
+    # (современный транспорт MCP, надёжнее устаревшего SSE). --stateful держит
+    # процесс-сервер живым между запросами. /healthz отдаёт 200 сразу.
+    command: >
+      supergateway --stdio "npx -y mcp-maigret"
+      --outputTransport streamableHttp --port 8000
+      --streamableHttpPath /mcp --stateful
+      --healthEndpoint /healthz
+    environment:
+      MCP_SERVER_ID: "maigret"
+      MAIGRET_REPORTS_DIR: "/tmp/maigret-reports"
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
+      - "/tmp/maigret-reports:/tmp/maigret-reports"
+    networks:
+      - osint
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -qO- http://localhost:8000/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+  shodan:
+    build:
+      context: .
+      dockerfile: servers/shodan/Dockerfile
+      args:
+        BASE_IMAGE: osint-mcp-base:latest
+    image: osint-mcp-shodan:latest
+    restart: unless-stopped
+    # supergateway публикует stdio-сервер как Streamable HTTP на :8000/mcp
+    # (современный транспорт MCP, надёжнее устаревшего SSE). --stateful держит
+    # процесс-сервер живым между запросами. /healthz отдаёт 200 сразу.
+    command: >
+      supergateway --stdio "npx -y @burtthecoder/mcp-shodan"
+      --outputTransport streamableHttp --port 8000
+      --streamableHttpPath /mcp --stateful
+      --healthEndpoint /healthz
+    environment:
+      MCP_SERVER_ID: "shodan"
+      # SHODAN_API_KEY — имя, которое читает сервер; значение из SHODAN_API_KEY в .env
+      SHODAN_API_KEY: "${SHODAN_API_KEY:-}"
+    networks:
+      - osint
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -qO- http://localhost:8000/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+  zoomeye:
+    build:
+      context: .
+      dockerfile: servers/zoomeye/Dockerfile
+      args:
+        BASE_IMAGE: osint-mcp-base:latest
+    image: osint-mcp-zoomeye:latest
+    restart: unless-stopped
+    # supergateway публикует stdio-сервер как Streamable HTTP на :8000/mcp
+    # (современный транспорт MCP, надёжнее устаревшего SSE). --stateful держит
+    # процесс-сервер живым между запросами. /healthz отдаёт 200 сразу.
+    command: >
+      supergateway --stdio "uvx mcp-server-zoomeye"
+      --outputTransport streamableHttp --port 8000
+      --streamableHttpPath /mcp --stateful
+      --healthEndpoint /healthz
+    environment:
+      MCP_SERVER_ID: "zoomeye"
+      # ZOOMEYE_API_KEY — имя, которое читает сервер; значение из ZOOMEYE_API_KEY в .env
+      ZOOMEYE_API_KEY: "${ZOOMEYE_API_KEY:-}"
+    networks:
+      - osint
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -qO- http://localhost:8000/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+  dnstwist:
+    build:
+      context: .
+      dockerfile: servers/dnstwist/Dockerfile
+      args:
+        BASE_IMAGE: osint-mcp-base:latest
+    image: osint-mcp-dnstwist:latest
+    restart: unless-stopped
+    # supergateway публикует stdio-сервер как Streamable HTTP на :8000/mcp
+    # (современный транспорт MCP, надёжнее устаревшего SSE). --stateful держит
+    # процесс-сервер живым между запросами. /healthz отдаёт 200 сразу.
+    command: >
+      supergateway --stdio "npx -y @burtthecoder/mcp-dnstwist"
+      --outputTransport streamableHttp --port 8000
+      --streamableHttpPath /mcp --stateful
+      --healthEndpoint /healthz
+    environment:
+      MCP_SERVER_ID: "dnstwist"
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
+    networks:
+      - osint
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -qO- http://localhost:8000/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+  brightdata:
+    build:
+      context: .
+      dockerfile: servers/brightdata/Dockerfile
+      args:
+        BASE_IMAGE: osint-mcp-base:latest
+    image: osint-mcp-brightdata:latest
+    restart: unless-stopped
+    # supergateway публикует stdio-сервер как Streamable HTTP на :8000/mcp
+    # (современный транспорт MCP, надёжнее устаревшего SSE). --stateful держит
+    # процесс-сервер живым между запросами. /healthz отдаёт 200 сразу.
+    command: >
+      supergateway --stdio "npx -y @brightdata/mcp"
+      --outputTransport streamableHttp --port 8000
+      --streamableHttpPath /mcp --stateful
+      --healthEndpoint /healthz
+    environment:
+      MCP_SERVER_ID: "brightdata"
+      # API_TOKEN — имя, которое читает сервер; значение из BRIGHTDATA_API_TOKEN в .env
+      API_TOKEN: "${BRIGHTDATA_API_TOKEN:-}"
+    networks:
+      - osint
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -qO- http://localhost:8000/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+  companyscope:
+    build:
+      context: .
+      dockerfile: servers/companyscope/Dockerfile
+      args:
+        BASE_IMAGE: osint-mcp-base:latest
+    image: osint-mcp-companyscope:latest
+    restart: unless-stopped
+    # supergateway публикует stdio-сервер как Streamable HTTP на :8000/mcp
+    # (современный транспорт MCP, надёжнее устаревшего SSE). --stateful держит
+    # процесс-сервер живым между запросами. /healthz отдаёт 200 сразу.
+    command: >
+      supergateway --stdio "npx -y companyscope-mcp"
+      --outputTransport streamableHttp --port 8000
+      --streamableHttpPath /mcp --stateful
+      --healthEndpoint /healthz
+    environment:
+      MCP_SERVER_ID: "companyscope"
+    networks:
+      - osint
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -qO- http://localhost:8000/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+  checko:
+    build:
+      context: .
+      dockerfile: servers/checko/Dockerfile
+      args:
+        BASE_IMAGE: osint-mcp-base:latest
+    image: osint-mcp-checko:latest
+    restart: unless-stopped
+    # supergateway публикует stdio-сервер как Streamable HTTP на :8000/mcp
+    # (современный транспорт MCP, надёжнее устаревшего SSE). --stateful держит
+    # процесс-сервер живым между запросами. /healthz отдаёт 200 сразу.
+    command: >
+      supergateway --stdio "uvx checko-mcp"
+      --outputTransport streamableHttp --port 8000
+      --streamableHttpPath /mcp --stateful
+      --healthEndpoint /healthz
+    environment:
+      MCP_SERVER_ID: "checko"
+      # CHECKO_API_KEY — имя, которое читает сервер; значение из CHECKO_API_KEY в .env
+      CHECKO_API_KEY: "${CHECKO_API_KEY:-}"
+    networks:
+      - osint
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -qO- http://localhost:8000/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+  stockscope:
+    build:
+      context: .
+      dockerfile: servers/stockscope/Dockerfile
+      args:
+        BASE_IMAGE: osint-mcp-base:latest
+    image: osint-mcp-stockscope:latest
+    restart: unless-stopped
+    # supergateway публикует stdio-сервер как Streamable HTTP на :8000/mcp
+    # (современный транспорт MCP, надёжнее устаревшего SSE). --stateful держит
+    # процесс-сервер живым между запросами. /healthz отдаёт 200 сразу.
+    command: >
+      supergateway --stdio "npx -y stockscope-mcp"
+      --outputTransport streamableHttp --port 8000
+      --streamableHttpPath /mcp --stateful
+      --healthEndpoint /healthz
+    environment:
+      MCP_SERVER_ID: "stockscope"
+    networks:
+      - osint
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -qO- http://localhost:8000/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+  virustotal:
+    build:
+      context: .
+      dockerfile: servers/virustotal/Dockerfile
+      args:
+        BASE_IMAGE: osint-mcp-base:latest
+    image: osint-mcp-virustotal:latest
+    restart: unless-stopped
+    # supergateway публикует stdio-сервер как Streamable HTTP на :8000/mcp
+    # (современный транспорт MCP, надёжнее устаревшего SSE). --stateful держит
+    # процесс-сервер живым между запросами. /healthz отдаёт 200 сразу.
+    command: >
+      supergateway --stdio "npx -y @burtthecoder/mcp-virustotal"
+      --outputTransport streamableHttp --port 8000
+      --streamableHttpPath /mcp --stateful
+      --healthEndpoint /healthz
+    environment:
+      MCP_SERVER_ID: "virustotal"
+      # VIRUSTOTAL_API_KEY — имя, которое читает сервер; значение из VIRUSTOTAL_API_KEY в .env
+      VIRUSTOTAL_API_KEY: "${VIRUSTOTAL_API_KEY:-}"
+    networks:
+      - osint
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -qO- http://localhost:8000/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+  voidly:
+    build:
+      context: .
+      dockerfile: servers/voidly/Dockerfile
+      args:
+        BASE_IMAGE: osint-mcp-base:latest
+    image: osint-mcp-voidly:latest
+    restart: unless-stopped
+    # supergateway публикует stdio-сервер как Streamable HTTP на :8000/mcp
+    # (современный транспорт MCP, надёжнее устаревшего SSE). --stateful держит
+    # процесс-сервер живым между запросами. /healthz отдаёт 200 сразу.
+    command: >
+      supergateway --stdio "npx -y @voidly/mcp-server"
+      --outputTransport streamableHttp --port 8000
+      --streamableHttpPath /mcp --stateful
+      --healthEndpoint /healthz
+    environment:
+      MCP_SERVER_ID: "voidly"
+    networks:
+      - osint
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -qO- http://localhost:8000/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+  openosint:
+    build:
+      context: .
+      dockerfile: servers/openosint/Dockerfile
+      args:
+        BASE_IMAGE: osint-mcp-base:latest
+    image: osint-mcp-openosint:latest
+    restart: unless-stopped
+    # supergateway публикует stdio-сервер как Streamable HTTP на :8000/mcp
+    # (современный транспорт MCP, надёжнее устаревшего SSE). --stateful держит
+    # процесс-сервер живым между запросами. /healthz отдаёт 200 сразу.
+    command: >
+      supergateway --stdio "uvx --from openosint openosint-mcp"
+      --outputTransport streamableHttp --port 8000
+      --streamableHttpPath /mcp --stateful
+      --healthEndpoint /healthz
+    environment:
+      MCP_SERVER_ID: "openosint"
+    networks:
+      - osint
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -qO- http://localhost:8000/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+  vulneramcp:
+    build:
+      context: .
+      dockerfile: servers/vulneramcp/Dockerfile
+      args:
+        BASE_IMAGE: osint-mcp-base:latest
+    image: osint-mcp-vulneramcp:latest
+    restart: unless-stopped
+    # supergateway публикует stdio-сервер как Streamable HTTP на :8000/mcp
+    # (современный транспорт MCP, надёжнее устаревшего SSE). --stateful держит
+    # процесс-сервер живым между запросами. /healthz отдаёт 200 сразу.
+    command: >
+      supergateway --stdio "node /app/dist/index.js"
+      --outputTransport streamableHttp --port 8000
+      --streamableHttpPath /mcp --stateful
+      --healthEndpoint /healthz
+    environment:
+      MCP_SERVER_ID: "vulneramcp"
+    networks:
+      - osint
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -qO- http://localhost:8000/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+# Сеть создаётся базовым docker-compose.yml; файлы всегда запускаются вместе.
+networks:
+  osint:
+    name: osint_net

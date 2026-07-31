@@ -1,0 +1,91 @@
+# =============================================================================
+# LiteLLM — единый LLM-шлюз (OpenAI-совместимый) для LibreChat.
+# Один эндпоинт http://litellm:4000/v1 отдаёт все модели-оркестраторы:
+# GigaChat, облачные (Claude/GPT) и локальные (Ollama).
+#
+# GigaChat не OpenAI-совместим (Sber OAuth, токен ~30 мин, российский CA).
+# Поэтому идём через sidecar gpt2giga (официальный прокси Sber), который отдаёт
+# OpenAI-совместимый /v1. Для LiteLLM это обычный openai-провайдер, поэтому шлюз
+# стартует даже когда серверы Sber недоступны (напр. из-за георестрикции).
+# Учётные данные (GIGACHAT_CREDENTIALS/SCOPE) заданы у сервиса gigachat-proxy.
+# =============================================================================
+model_list:
+  # ------------------------------ GigaChat (через gpt2giga) --------------
+  - model_name: GigaChat
+    litellm_params:
+      model: openai/GigaChat
+      api_base: http://gigachat-proxy:8090/v1
+      api_key: "not-needed"       # авторизация к Sber — внутри gpt2giga
+
+  - model_name: GigaChat-Pro
+    litellm_params:
+      model: openai/GigaChat-Pro
+      api_base: http://gigachat-proxy:8090/v1
+      api_key: "not-needed"
+
+  - model_name: GigaChat-Max
+    litellm_params:
+      model: openai/GigaChat-Max
+      api_base: http://gigachat-proxy:8090/v1
+      api_key: "not-needed"
+
+  # Новое поколение (2) — самые сильные модели GigaChat.
+  - model_name: GigaChat-2-Max
+    litellm_params:
+      model: openai/GigaChat-2-Max
+      api_base: http://gigachat-proxy:8090/v1
+      api_key: "not-needed"
+
+  - model_name: GigaChat-2-Pro
+    litellm_params:
+      model: openai/GigaChat-2-Pro
+      api_base: http://gigachat-proxy:8090/v1
+      api_key: "not-needed"
+
+  # -------------------------- Облако (опционально) -----------------------
+  # Работают, если задан ANTHROPIC_API_KEY / OPENAI_API_KEY в .env; иначе шлюз
+  # их регистрирует, но вызовы отвечают ошибкой авторизации (ключ пуст).
+  # Префикс (anthropic/ | openai/) выбирает провайдера; строка модели уходит в
+  # API как есть. Добавить ещё модель = ещё один блок model_name ниже.
+  - model_name: claude-opus-4-8         # Anthropic — самая сильная (Opus 4.8)
+    litellm_params:
+      model: anthropic/claude-opus-4-8
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: claude-sonnet-5         # Anthropic — быстрее/дешевле (Sonnet 5)
+    litellm_params:
+      model: anthropic/claude-sonnet-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: gpt-4o                  # OpenAI
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: os.environ/OPENAI_API_KEY
+
+  - model_name: gpt-4o-mini             # OpenAI — дешёвая для заголовков/черновиков
+    litellm_params:
+      model: openai/gpt-4o-mini
+      api_key: os.environ/OPENAI_API_KEY
+
+  # --------------------- Локально через Ollama (ОПЦИОНАЛЬНО) --------------
+  # Модели зарегистрированы всегда, но отвечают только когда Ollama запущена
+  # (профиль local-llm в compose, либо своя Ollama на хосте + OLLAMA_BASE_URL).
+  # Иначе вызовы «Local»-пресета вернут ошибку соединения — это ожидаемо.
+  - model_name: qwen2.5
+    litellm_params:
+      model: ollama_chat/qwen2.5:1.5b
+      api_base: os.environ/OLLAMA_BASE_URL
+
+  # Крупнее — только на мощном хосте: docker exec osint-ollama ollama pull llama3.1
+  - model_name: llama3.1
+    litellm_params:
+      model: ollama_chat/llama3.1
+      api_base: os.environ/OLLAMA_BASE_URL
+
+litellm_settings:
+  drop_params: true          # игнорировать неизвестные параметры вместо ошибки
+  request_timeout: 600
+  num_retries: 2
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY

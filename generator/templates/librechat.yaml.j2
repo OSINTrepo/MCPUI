@@ -1,0 +1,197 @@
+# =============================================================================
+# config/librechat.yaml — СГЕНЕРИРОВАН из registry/servers.yaml
+# НЕ РЕДАКТИРОВАТЬ ВРУЧНУЮ. Правь registry/servers.yaml + generator/generate.py,
+# затем: python generator/generate.py
+# =============================================================================
+version: 1.2.8
+cache: true
+
+# Разрешённые домены MCP. Непустой список ОТКЛЮЧАЕТ SSRF-защиту LibreChat,
+# которая иначе блокирует внутренние docker-хосты (приватные IP). Список
+# генерируется из реестра и включает все серверы — внутренние и remote.
+mcpSettings:
+  allowedDomains:
+{% for d in allowed_domains %}
+    - "{{ d }}"
+{% endfor %}
+
+# Первый вход: показать условия использования (спец. §8).
+interface:
+  # Закрепить селектор MCP с оркестратором в строке ввода — тогда выбор
+  # сервера переносится на новые чаты, а не сбрасывается. Штатная опция
+  # LibreChat (interface.defaultPinnedTools: ключи инструментов и/или имена
+  # MCP-серверов). Значения выбранных серверов живут в localStorage браузера,
+  # их доставляет scripts/librechat-ui-defaults.sh.
+  defaultPinnedTools: ["mcp", "orchestrator"]
+  termsOfService:
+    externalUrl: https://github.com/soxoj/awesome-osint-mcp-servers
+    openNewTab: true
+    modalAcceptance: true
+    modalTitle: "Условия использования OSINT-платформы"
+    modalContent: |
+      Инструменты предназначены для законной OSINT-аналитики по открытым
+      источникам. Запрещены преследование, вторжение в частную жизнь и любое
+      незаконное использование. Все запросы логируются (кто, когда, инструмент,
+      цель).
+
+# ------------------------------ LLM-эндпоинты --------------------------------
+# Все модели идут через LiteLLM-шлюз (OpenAI-совместимый), включая GigaChat.
+endpoints:
+  custom:
+    - name: "GigaChat (Sber)"
+      apiKey: "${LITELLM_MASTER_KEY}"
+      baseURL: "http://litellm:4000/v1"
+      models:
+        default: ["GigaChat", "GigaChat-Pro", "GigaChat-Max", "GigaChat-2-Max", "GigaChat-2-Pro"]
+        fetch: false
+      titleConvo: true
+      titleModel: "GigaChat"
+      modelDisplayLabel: "GigaChat"
+      # Контекст GigaChat-2 ~128k. Без этого LibreChat берёт малый дефолт (~30k),
+      # и определения MCP-инструментов не влезают. (Классические GigaChat/-Pro/-Max
+      # реально 32k — не грузите в них десятки инструментов сразу.)
+      maxContextTokens: 128000
+
+    - name: "Cloud (Claude/GPT via LiteLLM)"
+      apiKey: "${LITELLM_MASTER_KEY}"
+      baseURL: "http://litellm:4000/v1"
+      models:
+        default: ["claude-opus-4-8", "claude-sonnet-5", "gpt-4o", "gpt-4o-mini"]
+        fetch: false
+      titleConvo: true
+      titleModel: "gpt-4o-mini"
+      modelDisplayLabel: "Cloud"
+      # Работает только когда в .env задан ANTHROPIC_API_KEY / OPENAI_API_KEY.
+      maxContextTokens: 200000
+
+    # Локальная модель — ОПЦИОНАЛЬНА. Эндпоинт остаётся в UI, но отвечает только
+    # когда поднят профиль local-llm (docker compose --profile local-llm up -d
+    # ollama ollama-init) ИЛИ своя Ollama на хосте (OLLAMA_BASE_URL в .env).
+    - name: "Local (Ollama via LiteLLM)"
+      apiKey: "${LITELLM_MASTER_KEY}"
+      baseURL: "http://litellm:4000/v1"
+      models:
+        default: ["qwen2.5"]
+        fetch: false
+      titleConvo: true
+      titleModel: "qwen2.5"
+      modelDisplayLabel: "Local"
+
+# --------------------------- Пресеты (modelSpecs) ----------------------------
+# «GigaChat · OSINT» — готовый пресет: GigaChat-2-Pro + большой контекст (чтобы
+# влезали десятки определений MCP-инструментов; прямой чат иначе берёт дефолт
+# ~30k) + системный промпт с рецептами. Выберите его как «модель» в шапке чата.
+modelSpecs:
+  enforce: false
+  prioritize: true
+  list:
+    # АГЕНТНЫЙ режим (по умолчанию): виден только один сервер — orchestrator.
+    # Пользователь описывает задачу, агент сам подбирает серверы и собирает досье.
+    # mcpServers — на УРОВНЕ modelSpec (сестра preset), а НЕ внутри preset:
+    # LibreChat читает spec.mcpServers (dk: {mcp: modelSpec.mcpServers}) и сам
+    # проставляет сервер в выбор нового чата. Внутри preset это поле игнорируется.
+    - name: "gigachat-osint-auto"
+      label: "GigaChat · OSINT Авто"
+      description: "Опишите задачу — агент сам подберёт серверы и соберёт досье"
+      default: true
+      mcpServers: ["orchestrator"]
+      preset:
+        endpoint: "GigaChat (Sber)"
+        model: "GigaChat-2-Pro"
+        maxContextTokens: 128000
+        promptPrefix: |
+{{ system_prompt_auto | indent(width=10, first=True) }}
+
+    # Ручной пресет (gigachat-osint) убран: он показывал модели ВСЕ серверы (657
+    # инструментов) и переполнял контекст GigaChat — ровно та проблема, ради
+    # которой сделан orchestrator. Хотите ручной подбор — выберите эндпоинт
+    # «GigaChat (Sber)» напрямую и добавьте нужные серверы в панели MCP.
+
+    # Те же агентные пресеты, но на облачных/локальной LLM (нужен их ключ в .env
+    # или запущенный Ollama). Логика та же: виден только orchestrator, он сам
+    # подбирает серверы и собирает досье, чат-модель лишь показывает отчёт.
+    - name: "claude-osint-auto"
+      label: "Claude · OSINT Авто"
+      description: "Как «Авто», но на Claude Opus 4.8 (нужен ANTHROPIC_API_KEY)"
+      mcpServers: ["orchestrator"]
+      preset:
+        endpoint: "Cloud (Claude/GPT via LiteLLM)"
+        model: "claude-opus-4-8"
+        maxContextTokens: 200000
+        promptPrefix: |
+{{ system_prompt_auto | indent(width=10, first=True) }}
+
+    - name: "gpt-osint-auto"
+      label: "GPT · OSINT Авто"
+      description: "Как «Авто», но на GPT-4o (нужен OPENAI_API_KEY)"
+      mcpServers: ["orchestrator"]
+      preset:
+        endpoint: "Cloud (Claude/GPT via LiteLLM)"
+        model: "gpt-4o"
+        maxContextTokens: 128000
+        promptPrefix: |
+{{ system_prompt_auto | indent(width=10, first=True) }}
+
+    # Пресет для локальной модели — ОПЦИОНАЛЬНЫЙ (работает при профиле local-llm
+    # или своей Ollama на хосте). Оставлен в UI для деплоя на мощном хосте.
+    - name: "local-osint-auto"
+      label: "Local · OSINT Авто"
+      description: "Как «Авто», но на локальной модели Ollama (нужен запущенный Ollama)"
+      mcpServers: ["orchestrator"]
+      preset:
+        endpoint: "Local (Ollama via LiteLLM)"
+        model: "qwen2.5"
+        maxContextTokens: 32000
+        promptPrefix: |
+{{ system_prompt_auto | indent(width=10, first=True) }}
+
+# ------------------------------ MCP-серверы ----------------------------------
+# Сгенерировано из реестра. Включённых серверов: {{ servers | length }}
+mcpServers:
+{% for s in servers %}
+  # [{{ s.cost_tier | upper }}] {{ s.category }} — {{ s.description }}
+  {{ s.id }}:
+{% if s.transport == 'stdio' %}
+    type: streamable-http
+    url: "http://{{ s.id }}:{{ s.sse_port }}/mcp"
+{% elif s.transport == 'sse' %}
+    type: sse
+    url: "{{ s.url }}{% if s.auth.type == 'api_key' and s.auth.query_param and s.auth.user_var %}?{{ s.auth.query_param }}={{ '{{' }}{{ s.auth.user_var }}{{ '}}' }}{% endif %}"
+{% else %}
+    type: streamable-http
+    url: "{{ s.url }}{% if s.auth.type == 'api_key' and s.auth.query_param and s.auth.user_var %}?{{ s.auth.query_param }}={{ '{{' }}{{ s.auth.user_var }}{{ '}}' }}{% endif %}"
+{% endif %}
+{% if s.auth.type == 'api_key' and s.auth.user_var %}
+{% if s.transport == 'stdio' %}
+    headers:
+      # Per-user ключ уходит в патченный supergateway → env дочернего процесса.
+      # Если пользователь не задал ключ — остаётся значение из .env контейнера.
+      X-Mcp-Env: "{{ s.auth.env_var }}={{ '{{' }}{{ s.auth.user_var }}{{ '}}' }}"
+{% elif not s.auth.query_param %}
+    headers:
+      # Per-user ключ из vault LibreChat подставляется в заголовок ({{ '{{' }}VAR{{ '}}' }}).
+      {{ s.auth.header }}: "{% if s.auth.scheme %}{{ s.auth.scheme }} {% endif %}{{ '{{' }}{{ s.auth.user_var }}{{ '}}' }}"
+{% endif %}
+    # Нативная форма ввода ключа LibreChat: ⚙ у сервера → поле + бейдж Set/Unset.
+    customUserVars:
+      {{ s.auth.user_var }}:
+        title: "{{ s.key_title }}"
+        description: "{{ s.key_help }}"
+        sensitive: true
+{% endif %}
+    # Дружелюбные имя/описание для UI (панель MCP + пикер инструментов).
+    # title — только ASCII (LibreChat строго валидирует: буквы/цифры/пробелы,
+    # иначе ZodError и падение). Бейдж статуса ключа (🔑/🟡/💳/🟢) и категория —
+    # в description, где свободный текст: он виден в списке прямо под именем.
+    title: "{{ s.title }}"
+    description: "{{ s.ui_description }}"
+{% if s.server_instructions %}
+    serverInstructions: "{{ s.server_instructions }}"
+{% endif %}
+    chatMenu: true
+    # Запас времени на первый старт stdio-сервера внутри supergateway.
+    initTimeout: 120000
+    # Таймаут вызова инструмента. Некоторые серверы медленные (maigret сканит
+    # 3000+ сайтов через docker run) — даём щедрый запас, иначе MCP -32001.
+    timeout: 300000
+{% endfor %}
