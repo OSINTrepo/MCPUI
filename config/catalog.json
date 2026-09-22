@@ -148,22 +148,6 @@
     "repo": "https://github.com/brightdata/brightdata-mcp"
   },
   {
-    "id": "companyscope",
-    "display_name": "CompanyScope",
-    "category": "company",
-    "description": "Сводка о компании из открытых источников. Дай название компании.",
-    "cost_tier": "free",
-    "transport": "stdio",
-    "endpoint": "http://companyscope:8000/mcp",
-    "inputs": [
-      "company"
-    ],
-    "requires_key": false,
-    "key_var": null,
-    "status": "ready",
-    "repo": "https://github.com/Stewyboy1990/companyscope-mcp"
-  },
-  {
     "id": "checko",
     "display_name": "Checko MCP",
     "category": "company",
@@ -279,9 +263,9 @@
     "inputs": [
       "domain"
     ],
-    "requires_key": false,
-    "key_var": null,
-    "status": "ready",
+    "requires_key": true,
+    "key_var": "DOMSCAN_API_KEY",
+    "status": "needs_key",
     "repo": "https://domscan.net"
   },
   {
@@ -296,9 +280,9 @@
       "domain",
       "url"
     ],
-    "requires_key": true,
+    "requires_key": false,
     "key_var": "CRAWLGRAPH_API_KEY",
-    "status": "needs_key",
+    "status": "ready",
     "repo": "https://github.com/pucilpet/crawlgraph-mcp"
   },
   {
@@ -416,5 +400,74 @@
     "key_var": null,
     "status": "ready",
     "repo": "https://heliumtrades.com/mcp-page/"
+  },
+  {
+    "id": "censys",
+    "display_name": "Censys Platform",
+    "category": "network",
+    "description": "Порты, сервисы, сертификаты и поиск инфраструктуры Censys.",
+    "cost_tier": "freemium",
+    "transport": "stdio",
+    "endpoint": "http://censys:8000/mcp",
+    "inputs": [
+      "ip",
+      "domain"
+    ],
+    "requires_key": true,
+    "key_var": "CENSYS_PAT",
+    "status": "needs_key",
+    "repo": "local"
+  },
+  {
+    "id": "whoisxml",
+    "display_name": "WhoisXML History",
+    "category": "network",
+    "description": "История регистрации доменов; WhoisXML и резервный Whoxy.",
+    "cost_tier": "freemium",
+    "transport": "stdio",
+    "endpoint": "http://whoisxml:8000/mcp",
+    "inputs": [
+      "domain"
+    ],
+    "requires_key": true,
+    "key_var": "WHOISXML_API_KEY",
+    "status": "needs_key",
+    "repo": "local"
+  },
+  {
+    "id": "opencorporates",
+    "display_name": "OpenCorporates",
+    "category": "company",
+    "description": "Поиск юридических лиц и должностных лиц в реестрах.",
+    "cost_tier": "freemium",
+    "transport": "stdio",
+    "endpoint": "http://opencorporates:8000/mcp",
+    "inputs": [
+      "company"
+    ],
+    "requires_key": true,
+    "key_var": "OPENCORPORATES_API_KEY",
+    "status": "needs_key",
+    "repo": "local"
+  },
+  {
+    "id": "googlesearch",
+    "display_name": "Google Search",
+    "category": "research",
+    "description": "Тематический веб-поиск через Serper или Google CSE.",
+    "cost_tier": "freemium",
+    "transport": "stdio",
+    "endpoint": "http://googlesearch:8000/mcp",
+    "inputs": [
+      "query",
+      "company",
+      "domain",
+      "email",
+      "username"
+    ],
+    "requires_key": true,
+    "key_var": "SERPER_API_KEY",
+    "status": "needs_key",
+    "repo": "local"
   }
 ]

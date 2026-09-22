@@ -50,6 +50,10 @@ def _parse(body: str, want_id: Any) -> dict | None:
     return data
 
 
+class MCPProtocolError(RuntimeError):
+    """Ошибка транспорта/протокола без URL, заголовков и значений ключей."""
+
+
 class MCPClient:
     def __init__(self, url: str, headers: dict[str, str] | None = None, timeout: float = 60.0):
         self.url = url
@@ -67,12 +71,35 @@ class MCPClient:
         got = r.headers.get("Mcp-Session-Id")
         if got:
             self.sid = got
+        if not r.is_success:
+            raise MCPProtocolError(f"MCP HTTP {r.status_code}")
         return _parse(r.text, payload.get("id"))
 
+    async def _close(self, client: httpx.AsyncClient) -> None:
+        """Закрыть MCP-сессию (HTTP DELETE со своим Mcp-Session-Id).
+
+        Без этого каждый вызов оставлял на supergateway живую сессию: он держит
+        под каждую отдельный дочерний stdio-процесс и захлёбывается на десятке+
+        одновременных. Веер по компании делает ~40 вызовов, из них дюжина
+        rdap_ip подряд, — и хвост веера стабильно падал с ConnectError, хотя
+        сервер и сеть были в порядке. Это была наша утечка, а не сбой источника."""
+        if not self.sid:
+            return
+        try:
+            h = dict(self.headers)
+            h["Mcp-Session-Id"] = self.sid
+            await client.delete(self.url, headers=h, timeout=10)
+        except Exception:
+            pass  # закрытие — best-effort: результат вызова уже получен
+        finally:
+            self.sid = None
+
     async def _open(self, client: httpx.AsyncClient) -> None:
-        await self._post(client, {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+        reply = await self._post(client, {"jsonrpc": "2.0", "id": 1, "method": "initialize",
             "params": {"protocolVersion": "2025-03-26", "capabilities": {},
                        "clientInfo": {"name": "orchestrator", "version": "1"}}})
+        if not isinstance(reply, dict) or not isinstance(reply.get("result"), dict):
+            raise MCPProtocolError("MCP initialize: no valid result")
         try:
             h = dict(self.headers)
             if self.sid:
@@ -85,17 +112,31 @@ class MCPClient:
 
     async def list_tools(self) -> list[dict]:
         async with httpx.AsyncClient() as client:
-            await self._open(client)
-            data = await self._post(client, {"jsonrpc": "2.0", "id": 2,
-                                             "method": "tools/list", "params": {}})
-        return (data or {}).get("result", {}).get("tools", []) if data else []
+            try:
+                await self._open(client)
+                data = await self._post(client, {"jsonrpc": "2.0", "id": 2,
+                                                 "method": "tools/list", "params": {}})
+            finally:
+                await self._close(client)
+        if not isinstance(data, dict) or not isinstance(data.get("result"), dict):
+            raise MCPProtocolError("MCP tools/list: no valid result")
+        tools = data["result"].get("tools")
+        if not isinstance(tools, list):
+            raise MCPProtocolError("MCP tools/list: invalid tools collection")
+        return tools
 
     async def call(self, tool: str, arguments: dict) -> dict:
         """Вернёт {'ok': bool, 'text': str, 'raw': obj}."""
         async with httpx.AsyncClient() as client:
-            await self._open(client)
-            data = await self._post(client, {"jsonrpc": "2.0", "id": 3,
-                "method": "tools/call", "params": {"name": tool, "arguments": arguments}})
+            try:
+                await self._open(client)
+                data = await self._post(client, {"jsonrpc": "2.0", "id": 3,
+                    "method": "tools/call",
+                    "params": {"name": tool, "arguments": arguments}})
+            finally:
+                # Сессию закрываем ВСЕГДА, в т.ч. при таймауте/отмене — иначе
+                # оборванный вызов навсегда оставлял процесс на шлюзе.
+                await self._close(client)
         if not data:
             return {"ok": False, "text": "нет ответа от сервера", "raw": None}
         if data.get("error"):
@@ -103,4 +144,4 @@ class MCPClient:
         res = data.get("result", {})
         text = " ".join(c.get("text", "") for c in res.get("content", [])
                         if isinstance(c, dict) and c.get("type") == "text")
-        return {"ok": not res.get("isError", False), "text": text[:MAX_TEXT], "raw": res}
+        return {"ok": not res.get("isError", False), "text": text[:max(MAX_TEXT, 120000) if tool in ("corporate_website", "borme_publications", "get_finances") else MAX_TEXT], "raw": res}

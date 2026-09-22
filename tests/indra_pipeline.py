@@ -22,13 +22,15 @@ TASK = 'собери подробное досье по компании INDRA S
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('label')
+    parser.add_argument('--task', default=TASK, help='Компания/задача для нового сетевого прогона')
+    parser.add_argument('--output-group', default='indra-comparison', help='Подкаталог внутри /reports')
     parser.add_argument('--replay', type=Path)
     parser.add_argument('--supplement', type=Path, help='JSON дополнительных ответов с явным происхождением')
     parser.add_argument('--refresh', action='store_true', help='Повторить неполные новые источники перед replay')
     parser.add_argument('--model', help='Модель маршрутизации только для этого прогона')
     parser.add_argument('--report-model', help='Модель синтеза только для этого прогона')
     args = parser.parse_args()
-    out = Path('/reports/indra-comparison') / args.label
+    out = Path('/reports') / args.output_group / args.label
     out.mkdir(parents=True, exist_ok=True)
     if args.model:
         server.MODEL = args.model
@@ -73,12 +75,12 @@ async def main():
             dict(task=task, results=results, when=when, synthesis=synthesis, identity=identity),
             ensure_ascii=False, indent=2))
         info = save(task, results, when, str(out),
-                    server.REPORTS_URL_BASE + '/indra-comparison/' + args.label,
+                    server.REPORTS_URL_BASE + '/' + args.output_group + '/' + args.label,
                     synthesis, identity)
         for key in ("html_dl_url", "pdf_dl_url", "md_dl_url"):
             if info.get(key):
-                info[key] = info[key].replace("/indra-comparison/" + args.label + "/download/",
-                                              "/download/indra-comparison/" + args.label + "/")
+                info[key] = info[key].replace("/" + args.output_group + "/" + args.label + "/download/",
+                                              "/download/" + args.output_group + "/" + args.label + "/")
         return info
 
     server.report.save_report = capture
@@ -87,7 +89,7 @@ async def main():
     async def checkpoint(name, domains, results, identity=None):
         from datetime import datetime, timezone
         (out / 'evidence.json').write_text(json.dumps(dict(
-            task=TASK, results=results, identity=identity, synthesis=None,
+            task=args.task, results=results, identity=identity, synthesis=None,
             when=datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')),
             ensure_ascii=False, indent=2))
         return await build(name, domains, results, identity)
@@ -119,13 +121,18 @@ async def main():
         if args.supplement:
             results.extend(json.loads(args.supplement.read_text()))
         synthesis = await server.build_company_dossier(
-            ident.get('legal_name') or 'INDRA SISTEMAS SA', ident.get('domains', []), results, ident)
+            ident.get('legal_name') or ident.get('query') or record['task'], ident.get('domains', []), results, ident)
         from datetime import datetime, timezone
         when = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+        provenance = (f"> **Повторная сборка отчёта:** использованы сохранённые ответы источников от {record['when']}. "
+                      "Источники целиком повторно не опрашивались.")
+        if args.supplement:
+            provenance += " Дополнительные ответы включены отдельно; происхождение сохранено в материалах проверки."
+        synthesis = provenance + "\n\n" + (synthesis or "")
         info = capture(record['task'], results, when, '', '', synthesis, ident)
         result = server.render_chat_summary(record['task'], results, info, ident)
     else:
-        result = await server.investigate(TASK, Progress())
+        result = await server.investigate(args.task, Progress())
     (out / 'chat.md').write_text(result)
     print(result, flush=True)
     print(f'Elapsed: {time.monotonic() - started:.1f}s', flush=True)

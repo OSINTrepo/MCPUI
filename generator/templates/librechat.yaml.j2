@@ -52,17 +52,28 @@ endpoints:
       # реально 32k — не грузите в них десятки инструментов сразу.)
       maxContextTokens: 128000
 
-    - name: "Cloud (Claude/GPT/DeepSeek via LiteLLM)"
+    - name: "Cloud (LiteLLM)"
       apiKey: "${LITELLM_MASTER_KEY}"
       baseURL: "http://litellm:4000/v1"
       models:
-        default: ["deepseek-chat", "deepseek-reasoner", "claude-opus-4-8", "claude-sonnet-5", "gpt-4o", "gpt-4o-mini"]
+        default: ["deepseek-flash", "deepseek-chat", "deepseek-reasoner", "claude-opus-4-8", "claude-sonnet-5", "gpt-4o", "gpt-4o-mini"]
         fetch: false
       titleConvo: true
-      titleModel: "gpt-4o-mini"
+      titleModel: "deepseek-flash"
       modelDisplayLabel: "Cloud"
       # Работает только когда в .env задан соответствующий ключ:
       # DEEPSEEK_API_KEY / ANTHROPIC_API_KEY / OPENAI_API_KEY.
+      maxContextTokens: 128000
+
+    - name: "Qwen (Model Studio via LiteLLM)"
+      apiKey: "${LITELLM_MASTER_KEY}"
+      baseURL: "http://litellm:4000/v1"
+      models:
+        default: ["qwen-osint-fast", "qwen-osint-report"]
+        fetch: false
+      titleConvo: true
+      titleModel: "qwen-osint-fast"
+      modelDisplayLabel: "Qwen"
       maxContextTokens: 128000
 
     # Локальная модель — ОПЦИОНАЛЬНА. Эндпоинт остаётся в UI, но отвечает только
@@ -72,16 +83,16 @@ endpoints:
       apiKey: "${LITELLM_MASTER_KEY}"
       baseURL: "http://litellm:4000/v1"
       models:
-        default: ["qwen2.5"]
+        default: ["qwen2.5-14b", "qwen2.5"]
         fetch: false
       titleConvo: true
-      titleModel: "qwen2.5"
+      titleModel: "qwen2.5-14b"
       modelDisplayLabel: "Local"
 
 # --------------------------- Пресеты (modelSpecs) ----------------------------
-# «GigaChat · OSINT» — готовый пресет: GigaChat-2-Pro + большой контекст (чтобы
-# влезали десятки определений MCP-инструментов; прямой чат иначе берёт дефолт
-# ~30k) + системный промпт с рецептами. Выберите его как «модель» в шапке чата.
+# «DeepSeek · OSINT Авто» — основной пресет с проверенным писателем отчётов.
+# Остальные модели можно выбрать в шапке чата; внутренние модели задаются в .env.
+# Имя endpoint входит в URL маршрута LibreChat: символ / недопустим.
 modelSpecs:
   enforce: false
   prioritize: true
@@ -94,7 +105,6 @@ modelSpecs:
     - name: "gigachat-osint-auto"
       label: "GigaChat · OSINT Авто"
       description: "Опишите задачу — агент сам подберёт серверы и соберёт досье"
-      default: true
       mcpServers: ["orchestrator"]
       preset:
         endpoint: "GigaChat (Sber)"
@@ -111,13 +121,25 @@ modelSpecs:
     # Те же агентные пресеты, но на облачных/локальной LLM (нужен их ключ в .env
     # или запущенный Ollama). Логика та же: виден только orchestrator, он сам
     # подбирает серверы и собирает досье, чат-модель лишь показывает отчёт.
+    - name: "qwen-osint-auto"
+      label: "Qwen · OSINT Авто"
+      description: "Qwen Flash для чата; внутренние модели оркестратора задаются в .env"
+      mcpServers: ["orchestrator"]
+      preset:
+        endpoint: "Qwen (Model Studio via LiteLLM)"
+        model: "qwen-osint-fast"
+        maxContextTokens: 30000
+        promptPrefix: |
+{{ system_prompt_auto | indent(width=10, first=True) }}
+
     - name: "deepseek-osint-auto"
       label: "DeepSeek · OSINT Авто"
+      default: true
       description: "Как «Авто», но на DeepSeek — сильный писатель отчётов (нужен DEEPSEEK_API_KEY)"
       mcpServers: ["orchestrator"]
       preset:
-        endpoint: "Cloud (Claude/GPT/DeepSeek via LiteLLM)"
-        model: "deepseek-chat"
+        endpoint: "Cloud (LiteLLM)"
+        model: "deepseek-flash"
         maxContextTokens: 128000
         promptPrefix: |
 {{ system_prompt_auto | indent(width=10, first=True) }}
@@ -127,7 +149,7 @@ modelSpecs:
       description: "Как «Авто», но на Claude Opus 4.8 (нужен ANTHROPIC_API_KEY)"
       mcpServers: ["orchestrator"]
       preset:
-        endpoint: "Cloud (Claude/GPT/DeepSeek via LiteLLM)"
+        endpoint: "Cloud (LiteLLM)"
         model: "claude-opus-4-8"
         maxContextTokens: 200000
         promptPrefix: |
@@ -138,7 +160,7 @@ modelSpecs:
       description: "Как «Авто», но на GPT-4o (нужен OPENAI_API_KEY)"
       mcpServers: ["orchestrator"]
       preset:
-        endpoint: "Cloud (Claude/GPT/DeepSeek via LiteLLM)"
+        endpoint: "Cloud (LiteLLM)"
         model: "gpt-4o"
         maxContextTokens: 128000
         promptPrefix: |
@@ -152,8 +174,8 @@ modelSpecs:
       mcpServers: ["orchestrator"]
       preset:
         endpoint: "Local (Ollama via LiteLLM)"
-        model: "qwen2.5"
-        maxContextTokens: 32000
+        model: "qwen2.5-14b"
+        maxContextTokens: 24000
         promptPrefix: |
 {{ system_prompt_auto | indent(width=10, first=True) }}
 
@@ -205,5 +227,6 @@ mcpServers:
     initTimeout: 120000
     # Таймаут вызова инструмента. Некоторые серверы медленные (maigret сканит
     # 3000+ сайтов через docker run) — даём щедрый запас, иначе MCP -32001.
-    timeout: 300000
+    # Полное досье включает сбор источников и несколько вызовов модели.
+    timeout: {{ 900000 if s.id == "orchestrator" else 300000 }}
 {% endfor %}

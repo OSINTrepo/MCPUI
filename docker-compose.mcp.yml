@@ -20,6 +20,8 @@ services:
     # supergateway публикует stdio-сервер как Streamable HTTP на :8000/mcp
     # (современный транспорт MCP, надёжнее устаревшего SSE). --stateful держит
     # процесс-сервер живым между запросами. /healthz отдаёт 200 сразу.
+    # Идемпотентный патч применяется и к ранее собранным образам.
+    entrypoint: ["/bin/sh", "-c", 'node /opt/patch_supergateway.js && exec "$@"', "--"]
     command: >
       supergateway --stdio "python /app/server.py"
       --outputTransport streamableHttp --port 8000
@@ -27,15 +29,22 @@ services:
       --healthEndpoint /healthz
     environment:
       MCP_SERVER_ID: "orchestrator"
+      ORCHESTRATOR_ENTITY_MIN_SCORE: "${ORCHESTRATOR_ENTITY_MIN_SCORE:-3}"
+      ORCHESTRATOR_APPENDIX: "${ORCHESTRATOR_APPENDIX:-slim}"
+      ORCHESTRATOR_PAID_SOURCES: "${ORCHESTRATOR_PAID_SOURCES:-0}"
+      ORCHESTRATOR_RESOLVE_DEADLINE: "${ORCHESTRATOR_RESOLVE_DEADLINE:-45}"
+      ORCHESTRATOR_ENTITY_RESOLVE: "${ORCHESTRATOR_ENTITY_RESOLVE:-1}"
+      ORCHESTRATOR_COMPANY_DOMAINS: "${ORCHESTRATOR_COMPANY_DOMAINS:-1}"
       LITELLM_BASE_URL: "http://litellm:4000/v1"
-      ORCHESTRATOR_MODEL: "${ORCHESTRATOR_MODEL:-GigaChat-2-Pro}"
-      ORCHESTRATOR_REPORT_MODEL: "${ORCHESTRATOR_REPORT_MODEL:-GigaChat-2-Pro}"
+      ORCHESTRATOR_MODEL: "${ORCHESTRATOR_MODEL:-deepseek-flash}"
+      ORCHESTRATOR_REPORT_MODEL: "${ORCHESTRATOR_REPORT_MODEL:-deepseek-flash}"
       ORCHESTRATOR_DOMAIN_DEEP: "${ORCHESTRATOR_DOMAIN_DEEP:-1}"
       ORCHESTRATOR_VT_RELATIONSHIPS: "${ORCHESTRATOR_VT_RELATIONSHIPS:-4}"
       LITELLM_MASTER_KEY: "${LITELLM_MASTER_KEY}"
       REPORTS_DIR: "/reports"
-      REPORTS_URL_BASE: "http://localhost:8899"
+      REPORTS_URL_BASE: "${REPORTS_URL_BASE:-http://localhost:8899}"
     volumes:
+      - "./servers/base/patch_supergateway.js:/opt/patch_supergateway.js:ro"
       - "./config/catalog.json:/app/catalog.json:ro"
       - "./reports:/reports"
     networks:
@@ -57,6 +66,8 @@ services:
     # supergateway публикует stdio-сервер как Streamable HTTP на :8000/mcp
     # (современный транспорт MCP, надёжнее устаревшего SSE). --stateful держит
     # процесс-сервер живым между запросами. /healthz отдаёт 200 сразу.
+    # Идемпотентный патч применяется и к ранее собранным образам.
+    entrypoint: ["/bin/sh", "-c", 'node /opt/patch_supergateway.js && exec "$@"', "--"]
     command: >
       supergateway --stdio "npx -y mcp-maigret"
       --outputTransport streamableHttp --port 8000
@@ -66,6 +77,7 @@ services:
       MCP_SERVER_ID: "maigret"
       MAIGRET_REPORTS_DIR: "/tmp/maigret-reports"
     volumes:
+      - "./servers/base/patch_supergateway.js:/opt/patch_supergateway.js:ro"
       - "/var/run/docker.sock:/var/run/docker.sock"
       - "/tmp/maigret-reports:/tmp/maigret-reports"
     networks:
@@ -87,6 +99,8 @@ services:
     # supergateway публикует stdio-сервер как Streamable HTTP на :8000/mcp
     # (современный транспорт MCP, надёжнее устаревшего SSE). --stateful держит
     # процесс-сервер живым между запросами. /healthz отдаёт 200 сразу.
+    # Идемпотентный патч применяется и к ранее собранным образам.
+    entrypoint: ["/bin/sh", "-c", 'node /opt/patch_supergateway.js && exec "$@"', "--"]
     command: >
       supergateway --stdio "npx -y @burtthecoder/mcp-shodan"
       --outputTransport streamableHttp --port 8000
@@ -96,6 +110,8 @@ services:
       MCP_SERVER_ID: "shodan"
       # SHODAN_API_KEY — имя, которое читает сервер; значение из SHODAN_API_KEY в .env
       SHODAN_API_KEY: "${SHODAN_API_KEY:-}"
+    volumes:
+      - "./servers/base/patch_supergateway.js:/opt/patch_supergateway.js:ro"
     networks:
       - osint
     healthcheck:
@@ -115,8 +131,10 @@ services:
     # supergateway публикует stdio-сервер как Streamable HTTP на :8000/mcp
     # (современный транспорт MCP, надёжнее устаревшего SSE). --stateful держит
     # процесс-сервер живым между запросами. /healthz отдаёт 200 сразу.
+    # Идемпотентный патч применяется и к ранее собранным образам.
+    entrypoint: ["/bin/sh", "-c", 'node /opt/patch_supergateway.js && exec "$@"', "--"]
     command: >
-      supergateway --stdio "uvx mcp-server-zoomeye"
+      supergateway --stdio "uvx --offline --with httpx --with 'mcp==1.15.0' mcp-server-zoomeye"
       --outputTransport streamableHttp --port 8000
       --streamableHttpPath /mcp --stateful
       --healthEndpoint /healthz
@@ -124,6 +142,8 @@ services:
       MCP_SERVER_ID: "zoomeye"
       # ZOOMEYE_API_KEY — имя, которое читает сервер; значение из ZOOMEYE_API_KEY в .env
       ZOOMEYE_API_KEY: "${ZOOMEYE_API_KEY:-}"
+    volumes:
+      - "./servers/base/patch_supergateway.js:/opt/patch_supergateway.js:ro"
     networks:
       - osint
     healthcheck:
@@ -143,6 +163,8 @@ services:
     # supergateway публикует stdio-сервер как Streamable HTTP на :8000/mcp
     # (современный транспорт MCP, надёжнее устаревшего SSE). --stateful держит
     # процесс-сервер живым между запросами. /healthz отдаёт 200 сразу.
+    # Идемпотентный патч применяется и к ранее собранным образам.
+    entrypoint: ["/bin/sh", "-c", 'node /opt/patch_supergateway.js && exec "$@"', "--"]
     command: >
       supergateway --stdio "npx -y @burtthecoder/mcp-dnstwist"
       --outputTransport streamableHttp --port 8000
@@ -151,6 +173,7 @@ services:
     environment:
       MCP_SERVER_ID: "dnstwist"
     volumes:
+      - "./servers/base/patch_supergateway.js:/opt/patch_supergateway.js:ro"
       - "/var/run/docker.sock:/var/run/docker.sock"
     networks:
       - osint
@@ -171,6 +194,8 @@ services:
     # supergateway публикует stdio-сервер как Streamable HTTP на :8000/mcp
     # (современный транспорт MCP, надёжнее устаревшего SSE). --stateful держит
     # процесс-сервер живым между запросами. /healthz отдаёт 200 сразу.
+    # Идемпотентный патч применяется и к ранее собранным образам.
+    entrypoint: ["/bin/sh", "-c", 'node /opt/patch_supergateway.js && exec "$@"', "--"]
     command: >
       supergateway --stdio "python /app/server.py"
       --outputTransport streamableHttp --port 8000
@@ -178,10 +203,16 @@ services:
       --healthEndpoint /healthz
     environment:
       MCP_SERVER_ID: "directapi"
+      GOOGLE_CSE_DEFAULT_CX: "${GOOGLE_CSE_DEFAULT_CX:-}"
+      GOOGLE_CSE_API_KEY: "${GOOGLE_CSE_API_KEY:-}"
+      WHOXY_API_KEY: "${WHOXY_API_KEY:-}"
+      SERPER_API_KEY: "${SERPER_API_KEY:-}"
       CENSYS_PAT: "${CENSYS_PAT:-}"
       CENSYS_ORG_ID: "${CENSYS_ORG_ID:-}"
       WHOISXML_API_KEY: "${WHOISXML_API_KEY:-}"
       OPENCORPORATES_API_KEY: "${OPENCORPORATES_API_KEY:-}"
+    volumes:
+      - "./servers/base/patch_supergateway.js:/opt/patch_supergateway.js:ro"
     networks:
       - osint
     healthcheck:
@@ -201,6 +232,8 @@ services:
     # supergateway публикует stdio-сервер как Streamable HTTP на :8000/mcp
     # (современный транспорт MCP, надёжнее устаревшего SSE). --stateful держит
     # процесс-сервер живым между запросами. /healthz отдаёт 200 сразу.
+    # Идемпотентный патч применяется и к ранее собранным образам.
+    entrypoint: ["/bin/sh", "-c", 'node /opt/patch_supergateway.js && exec "$@"', "--"]
     command: >
       supergateway --stdio "npx -y @brightdata/mcp"
       --outputTransport streamableHttp --port 8000
@@ -210,32 +243,8 @@ services:
       MCP_SERVER_ID: "brightdata"
       # API_TOKEN — имя, которое читает сервер; значение из BRIGHTDATA_API_TOKEN в .env
       API_TOKEN: "${BRIGHTDATA_API_TOKEN:-}"
-    networks:
-      - osint
-    healthcheck:
-      test: ["CMD", "sh", "-c", "wget -qO- http://localhost:8000/healthz >/dev/null 2>&1 || exit 1"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 20s
-  companyscope:
-    build:
-      context: .
-      dockerfile: servers/companyscope/Dockerfile
-      args:
-        BASE_IMAGE: osint-mcp-base:latest
-    image: osint-mcp-companyscope:latest
-    restart: unless-stopped
-    # supergateway публикует stdio-сервер как Streamable HTTP на :8000/mcp
-    # (современный транспорт MCP, надёжнее устаревшего SSE). --stateful держит
-    # процесс-сервер живым между запросами. /healthz отдаёт 200 сразу.
-    command: >
-      supergateway --stdio "npx -y companyscope-mcp"
-      --outputTransport streamableHttp --port 8000
-      --streamableHttpPath /mcp --stateful
-      --healthEndpoint /healthz
-    environment:
-      MCP_SERVER_ID: "companyscope"
+    volumes:
+      - "./servers/base/patch_supergateway.js:/opt/patch_supergateway.js:ro"
     networks:
       - osint
     healthcheck:
@@ -255,8 +264,10 @@ services:
     # supergateway публикует stdio-сервер как Streamable HTTP на :8000/mcp
     # (современный транспорт MCP, надёжнее устаревшего SSE). --stateful держит
     # процесс-сервер живым между запросами. /healthz отдаёт 200 сразу.
+    # Идемпотентный патч применяется и к ранее собранным образам.
+    entrypoint: ["/bin/sh", "-c", 'node /opt/patch_supergateway.js && exec "$@"', "--"]
     command: >
-      supergateway --stdio "uvx --with 'mcp==1.15.0' checko-mcp"
+      supergateway --stdio "uvx --offline --with 'mcp==1.15.0' checko-mcp"
       --outputTransport streamableHttp --port 8000
       --streamableHttpPath /mcp --stateful
       --healthEndpoint /healthz
@@ -264,6 +275,8 @@ services:
       MCP_SERVER_ID: "checko"
       # CHECKO_API_KEY — имя, которое читает сервер; значение из CHECKO_API_KEY в .env
       CHECKO_API_KEY: "${CHECKO_API_KEY:-}"
+    volumes:
+      - "./servers/base/patch_supergateway.js:/opt/patch_supergateway.js:ro"
     networks:
       - osint
     healthcheck:
@@ -283,6 +296,8 @@ services:
     # supergateway публикует stdio-сервер как Streamable HTTP на :8000/mcp
     # (современный транспорт MCP, надёжнее устаревшего SSE). --stateful держит
     # процесс-сервер живым между запросами. /healthz отдаёт 200 сразу.
+    # Идемпотентный патч применяется и к ранее собранным образам.
+    entrypoint: ["/bin/sh", "-c", 'node /opt/patch_supergateway.js && exec "$@"', "--"]
     command: >
       supergateway --stdio "npx -y stockscope-mcp"
       --outputTransport streamableHttp --port 8000
@@ -290,6 +305,8 @@ services:
       --healthEndpoint /healthz
     environment:
       MCP_SERVER_ID: "stockscope"
+    volumes:
+      - "./servers/base/patch_supergateway.js:/opt/patch_supergateway.js:ro"
     networks:
       - osint
     healthcheck:
@@ -309,6 +326,8 @@ services:
     # supergateway публикует stdio-сервер как Streamable HTTP на :8000/mcp
     # (современный транспорт MCP, надёжнее устаревшего SSE). --stateful держит
     # процесс-сервер живым между запросами. /healthz отдаёт 200 сразу.
+    # Идемпотентный патч применяется и к ранее собранным образам.
+    entrypoint: ["/bin/sh", "-c", 'node /opt/patch_supergateway.js && exec "$@"', "--"]
     command: >
       supergateway --stdio "npx -y @burtthecoder/mcp-virustotal"
       --outputTransport streamableHttp --port 8000
@@ -318,6 +337,8 @@ services:
       MCP_SERVER_ID: "virustotal"
       # VIRUSTOTAL_API_KEY — имя, которое читает сервер; значение из VIRUSTOTAL_API_KEY в .env
       VIRUSTOTAL_API_KEY: "${VIRUSTOTAL_API_KEY:-}"
+    volumes:
+      - "./servers/base/patch_supergateway.js:/opt/patch_supergateway.js:ro"
     networks:
       - osint
     healthcheck:
@@ -337,6 +358,8 @@ services:
     # supergateway публикует stdio-сервер как Streamable HTTP на :8000/mcp
     # (современный транспорт MCP, надёжнее устаревшего SSE). --stateful держит
     # процесс-сервер живым между запросами. /healthz отдаёт 200 сразу.
+    # Идемпотентный патч применяется и к ранее собранным образам.
+    entrypoint: ["/bin/sh", "-c", 'node /opt/patch_supergateway.js && exec "$@"', "--"]
     command: >
       supergateway --stdio "npx -y @voidly/mcp-server"
       --outputTransport streamableHttp --port 8000
@@ -344,6 +367,8 @@ services:
       --healthEndpoint /healthz
     environment:
       MCP_SERVER_ID: "voidly"
+    volumes:
+      - "./servers/base/patch_supergateway.js:/opt/patch_supergateway.js:ro"
     networks:
       - osint
     healthcheck:
@@ -363,13 +388,17 @@ services:
     # supergateway публикует stdio-сервер как Streamable HTTP на :8000/mcp
     # (современный транспорт MCP, надёжнее устаревшего SSE). --stateful держит
     # процесс-сервер живым между запросами. /healthz отдаёт 200 сразу.
+    # Идемпотентный патч применяется и к ранее собранным образам.
+    entrypoint: ["/bin/sh", "-c", 'node /opt/patch_supergateway.js && exec "$@"', "--"]
     command: >
-      supergateway --stdio "uvx --from openosint openosint-mcp"
+      supergateway --stdio "uvx --offline --from openosint --with 'mcp==1.15.0' --with sublist3r openosint-mcp"
       --outputTransport streamableHttp --port 8000
       --streamableHttpPath /mcp --stateful
       --healthEndpoint /healthz
     environment:
       MCP_SERVER_ID: "openosint"
+    volumes:
+      - "./servers/base/patch_supergateway.js:/opt/patch_supergateway.js:ro"
     networks:
       - osint
     healthcheck:
@@ -389,6 +418,8 @@ services:
     # supergateway публикует stdio-сервер как Streamable HTTP на :8000/mcp
     # (современный транспорт MCP, надёжнее устаревшего SSE). --stateful держит
     # процесс-сервер живым между запросами. /healthz отдаёт 200 сразу.
+    # Идемпотентный патч применяется и к ранее собранным образам.
+    entrypoint: ["/bin/sh", "-c", 'node /opt/patch_supergateway.js && exec "$@"', "--"]
     command: >
       supergateway --stdio "node /app/dist/index.js"
       --outputTransport streamableHttp --port 8000
@@ -396,6 +427,140 @@ services:
       --healthEndpoint /healthz
     environment:
       MCP_SERVER_ID: "vulneramcp"
+    volumes:
+      - "./servers/base/patch_supergateway.js:/opt/patch_supergateway.js:ro"
+    networks:
+      - osint
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -qO- http://localhost:8000/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+  censys:
+    build:
+      context: .
+      dockerfile: servers/censys/Dockerfile
+      args:
+        BASE_IMAGE: osint-mcp-base:latest
+    image: osint-mcp-censys:latest
+    restart: unless-stopped
+    # supergateway публикует stdio-сервер как Streamable HTTP на :8000/mcp
+    # (современный транспорт MCP, надёжнее устаревшего SSE). --stateful держит
+    # процесс-сервер живым между запросами. /healthz отдаёт 200 сразу.
+    # Идемпотентный патч применяется и к ранее собранным образам.
+    entrypoint: ["/bin/sh", "-c", 'node /opt/patch_supergateway.js && exec "$@"', "--"]
+    command: >
+      supergateway --stdio "python /app/server.py"
+      --outputTransport streamableHttp --port 8000
+      --streamableHttpPath /mcp --stateful
+      --healthEndpoint /healthz
+    environment:
+      MCP_SERVER_ID: "censys"
+      # CENSYS_PAT — имя, которое читает сервер; значение из CENSYS_PAT в .env
+      CENSYS_PAT: "${CENSYS_PAT:-}"
+      CENSYS_ORG_ID: "${CENSYS_ORG_ID:-}"
+    volumes:
+      - "./servers/base/patch_supergateway.js:/opt/patch_supergateway.js:ro"
+    networks:
+      - osint
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -qO- http://localhost:8000/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+  whoisxml:
+    build:
+      context: .
+      dockerfile: servers/whoisxml/Dockerfile
+      args:
+        BASE_IMAGE: osint-mcp-base:latest
+    image: osint-mcp-whoisxml:latest
+    restart: unless-stopped
+    # supergateway публикует stdio-сервер как Streamable HTTP на :8000/mcp
+    # (современный транспорт MCP, надёжнее устаревшего SSE). --stateful держит
+    # процесс-сервер живым между запросами. /healthz отдаёт 200 сразу.
+    # Идемпотентный патч применяется и к ранее собранным образам.
+    entrypoint: ["/bin/sh", "-c", 'node /opt/patch_supergateway.js && exec "$@"', "--"]
+    command: >
+      supergateway --stdio "python /app/server.py"
+      --outputTransport streamableHttp --port 8000
+      --streamableHttpPath /mcp --stateful
+      --healthEndpoint /healthz
+    environment:
+      MCP_SERVER_ID: "whoisxml"
+      # WHOISXML_API_KEY — имя, которое читает сервер; значение из WHOISXML_API_KEY в .env
+      WHOISXML_API_KEY: "${WHOISXML_API_KEY:-}"
+      WHOXY_API_KEY: "${WHOXY_API_KEY:-}"
+    volumes:
+      - "./servers/base/patch_supergateway.js:/opt/patch_supergateway.js:ro"
+    networks:
+      - osint
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -qO- http://localhost:8000/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+  opencorporates:
+    build:
+      context: .
+      dockerfile: servers/opencorporates/Dockerfile
+      args:
+        BASE_IMAGE: osint-mcp-base:latest
+    image: osint-mcp-opencorporates:latest
+    restart: unless-stopped
+    # supergateway публикует stdio-сервер как Streamable HTTP на :8000/mcp
+    # (современный транспорт MCP, надёжнее устаревшего SSE). --stateful держит
+    # процесс-сервер живым между запросами. /healthz отдаёт 200 сразу.
+    # Идемпотентный патч применяется и к ранее собранным образам.
+    entrypoint: ["/bin/sh", "-c", 'node /opt/patch_supergateway.js && exec "$@"', "--"]
+    command: >
+      supergateway --stdio "python /app/server.py"
+      --outputTransport streamableHttp --port 8000
+      --streamableHttpPath /mcp --stateful
+      --healthEndpoint /healthz
+    environment:
+      MCP_SERVER_ID: "opencorporates"
+      # OPENCORPORATES_API_KEY — имя, которое читает сервер; значение из OPENCORPORATES_API_KEY в .env
+      OPENCORPORATES_API_KEY: "${OPENCORPORATES_API_KEY:-}"
+    volumes:
+      - "./servers/base/patch_supergateway.js:/opt/patch_supergateway.js:ro"
+    networks:
+      - osint
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -qO- http://localhost:8000/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+  googlesearch:
+    build:
+      context: .
+      dockerfile: servers/googlesearch/Dockerfile
+      args:
+        BASE_IMAGE: osint-mcp-base:latest
+    image: osint-mcp-googlesearch:latest
+    restart: unless-stopped
+    # supergateway публикует stdio-сервер как Streamable HTTP на :8000/mcp
+    # (современный транспорт MCP, надёжнее устаревшего SSE). --stateful держит
+    # процесс-сервер живым между запросами. /healthz отдаёт 200 сразу.
+    # Идемпотентный патч применяется и к ранее собранным образам.
+    entrypoint: ["/bin/sh", "-c", 'node /opt/patch_supergateway.js && exec "$@"', "--"]
+    command: >
+      supergateway --stdio "python /app/server.py"
+      --outputTransport streamableHttp --port 8000
+      --streamableHttpPath /mcp --stateful
+      --healthEndpoint /healthz
+    environment:
+      MCP_SERVER_ID: "googlesearch"
+      # SERPER_API_KEY — имя, которое читает сервер; значение из SERPER_API_KEY в .env
+      SERPER_API_KEY: "${SERPER_API_KEY:-}"
+      GOOGLE_CSE_API_KEY: "${GOOGLE_CSE_API_KEY:-}"
+      GOOGLE_CSE_DEFAULT_CX: "${GOOGLE_CSE_DEFAULT_CX:-}"
+    volumes:
+      - "./servers/base/patch_supergateway.js:/opt/patch_supergateway.js:ro"
     networks:
       - osint
     healthcheck:

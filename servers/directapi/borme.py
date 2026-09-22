@@ -41,7 +41,7 @@ def parse(html, query, url):
         for i in range(1, len(chunks), 2):
             event = chunks[i].rstrip('.')
             block = re.split(r'Datos registrales\.|Otros conceptos\.', chunks[i+1])[0]
-            roles = list(re.finditer(r'([A-Za-zÁÉÍÓÚÑáéíóúñ][A-Za-zÁÉÍÓÚÑáéíóúñ./ ]{0,35}):', block))
+            roles = list(re.finditer(r'([A-Za-zÁÉÍÓÚÑáéíóúñ][A-Za-zÁÉÍÓÚÑáéíóúñ./]{0,35}):', block))
             for k, match in enumerate(roles):
                 role = match.group(1).strip()
                 names = block[match.end():roles[k+1].start() if k+1 < len(roles) else len(block)]

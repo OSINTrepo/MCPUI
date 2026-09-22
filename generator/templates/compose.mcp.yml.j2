@@ -21,6 +21,8 @@ services:
     # supergateway публикует stdio-сервер как Streamable HTTP на :{{ s.sse_port }}/mcp
     # (современный транспорт MCP, надёжнее устаревшего SSE). --stateful держит
     # процесс-сервер живым между запросами. /healthz отдаёт 200 сразу.
+    # Идемпотентный патч применяется и к ранее собранным образам.
+    entrypoint: ["/bin/sh", "-c", 'node /opt/patch_supergateway.js && exec "$@"', "--"]
     command: >
       supergateway --stdio "{{ s.stdio_command }}"
       --outputTransport streamableHttp --port {{ s.sse_port }}
@@ -35,12 +37,11 @@ services:
 {% for k, v in (s.env or {}).items() %}
       {{ k }}: "{{ v }}"
 {% endfor %}
-{% if s.volumes %}
     volumes:
+      - "./servers/base/patch_supergateway.js:/opt/patch_supergateway.js:ro"
 {% for v in s.volumes %}
       - "{{ v }}"
 {% endfor %}
-{% endif %}
     networks:
       - osint
     healthcheck:

@@ -82,10 +82,78 @@ model_list:
       model: deepseek/deepseek-reasoner
       api_key: os.environ/DEEPSEEK_API_KEY
 
+  # Китайские модели: отдельные PAYG и Token Plan маршруты, без автопереключения оплаты.
+  - model_name: qwen-osint-fast
+    litellm_params:
+      model: openai/qwen3.7-flash-2026-07-15
+      api_base: os.environ/QWEN_API_BASE
+      api_key: os.environ/DASHSCOPE_API_KEY
+      extra_body:
+        enable_thinking: false
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_vision: true
+      max_input_tokens: 1000000
+      max_output_tokens: 65536
+
+  - model_name: qwen-osint-report
+    litellm_params:
+      model: openai/qwen3.7-plus-2026-05-26
+      api_base: os.environ/QWEN_API_BASE
+      api_key: os.environ/DASHSCOPE_API_KEY
+      extra_body:
+        enable_thinking: false
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_vision: true
+      max_input_tokens: 1000000
+      max_output_tokens: 65536
+
+  - model_name: qwen-plan-report
+    litellm_params:
+      model: openai/qwen3.7-plus
+      api_base: os.environ/QWEN_TOKEN_PLAN_API_BASE
+      api_key: os.environ/QWEN_TOKEN_PLAN_API_KEY
+      extra_body:
+        enable_thinking: false
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_vision: true
+      max_input_tokens: 1000000
+      max_output_tokens: 65536
+
+  - model_name: deepseek-flash
+    litellm_params:
+      model: openai/deepseek-flash
+      api_base: https://api.deepseek.com
+      api_key: os.environ/DEEPSEEK_API_KEY
+      extra_body:
+        thinking:
+          type: disabled
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_vision: true
+      max_input_tokens: 1000000
+
   # --------------------- Локально через Ollama (ОПЦИОНАЛЬНО) --------------
   # Модели зарегистрированы всегда, но отвечают только когда Ollama запущена
   # (профиль local-llm в compose, либо своя Ollama на хосте + OLLAMA_BASE_URL).
   # Иначе вызовы «Local»-пресета вернут ошибку соединения — это ожидаемо.
+  # Рабочий локальный профиль: одна модель для чата, инструментов и досье.
+  - model_name: qwen2.5-14b
+    litellm_params:
+      model: ollama_chat/qwen2.5:14b
+      api_base: os.environ/OLLAMA_BASE_URL
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      max_input_tokens: 32768
+      max_output_tokens: 8192
+
   - model_name: qwen2.5
     litellm_params:
       model: ollama_chat/qwen2.5:1.5b

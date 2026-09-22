@@ -1,0 +1,10 @@
+# NVIDIA GPU для Ollama. Драйвер и NVIDIA Container Toolkit устанавливаются на хост.
+services:
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

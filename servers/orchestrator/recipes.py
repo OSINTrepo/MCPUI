@@ -15,6 +15,13 @@ RE_IPV4 = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 RE_URL = re.compile(r"\bhttps?://[^\s]+", re.I)
 RE_HASH = re.compile(r"\b[a-fA-F0-9]{64}\b|\b[a-fA-F0-9]{40}\b|\b[a-fA-F0-9]{32}\b")
 RE_INN = re.compile(r"\b\d{10}\b|\b\d{12}\b")
+RE_CIK = re.compile(r"\bCIK[\s:#№=-]*(\d{1,10})\b", re.I)
+
+
+def inn_values(text: str) -> list[str]:
+    """Десятизначный CIK SEC не является российским ИНН."""
+    return RE_INN.findall(RE_CIK.sub(" ", text or ""))
+
 RE_DOMAIN = re.compile(r"\b(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}\b")
 RE_TICKER = re.compile(r"\$([A-Z]{1,5})\b")
 # Тикер словами: «тикер AAPL», «ticker aapl» (без $ — так пишут чаще).
@@ -27,26 +34,45 @@ RE_ORG = re.compile(
 RE_COMPANY_KW = re.compile(
     r"(?:компани[июяе]|фирм[ауые]|организаци[июяе]|company)\s+"
     r"[«\"']?([\w\-]+(?:\s+[\w\-]+){0,3})", re.I)
+# Международные правовые формы: «Indra Sistemas SA», «Siemens AG», «Apple Inc».
+# Матчит: имя (≥1 слова с заглавной) + правовая форма в конце.
+RE_INT_ORG = re.compile(
+    r"\b([A-ZА-Я][a-zA-Zа-яёА-ЯЁ0-9\-\.&]{1,30}"
+    r"(?:\s+[A-ZА-Яa-zа-яё0-9\-\.&]{1,30}){0,5})"
+    r"\s+\b(S\.?A\.?U?\.?|S\.?L\.?U?\.?|GmbH(?:\s*&\s*Co\.?\s*K\.?G\.?)?|A\.?G\.?|"
+    r"Plc\.?|Ltd\.?|Limited|Inc\.?|Incorporated|Corp\.?|Corporation|"
+    r"N\.?V\.?|B\.?V\.?|AB|Oy|S\.?R\.?L\.?|Sp\.?A\.?|SE|SAS|SARL|SAU|"
+    r"S\.A\.\s*de\s*C\.V\.|LLC|L\.?L\.?C\.?|LLP|L\.?L\.?P\.?)\b",
+    re.I
+)
 
 # Стоп-слова в «имени компании»: предлоги/служебные, которые ошибочно попадают в
 # захват из фраз вроде «компанию ПО ИНН 7707083893» → бракованное имя.
+# Стоп-слова: ведущие — пропускаются; терминирующие — обрывают захват.
 _COMPANY_STOP = {"по", "с", "на", "об", "о", "из", "для", "к", "у", "при", "за",
                  "инн", "огрн", "огрнип", "кпп", "названию", "имени", "номеру"}
+_COMPANY_TERM = {"сайт", "сайте", "site", "website", "домен", "domain", "url",
+                 "адрес", "address", "телефон", "phone", "email", "почта", "cif", "nif",
+                 "инн", "огрн", "кпп", "тикер", "ticker", "cik"}
 
 
 def _clean_company(name: str) -> str | None:
     """Чистит захваченное имя компании: убирает ведущие предлоги/служебные слова
-    и обрывает на длинном числе (ИНН/ОГРН — не часть названия). None, если после
-    чистки ничего осмысленного не осталось (тогда это не имя компании)."""
+    и обрывает на длинном числе (ИНН/ОГРН — не часть названия) или терминирующем
+    слове ('сайт', 'site', 'домен'). None, если после чистки ничего осмысленного
+    не осталось (тогда это не имя компании)."""
     out: list[str] = []
     for tok in name.strip(" «»\"'").split():
+        low = tok.lower().strip(".,")
         if re.fullmatch(r"\d{6,}", tok):          # длинное число = ИНН/ОГРН
             break
-        if not out and tok.lower().strip(".,") in _COMPANY_STOP:
+        if low in _COMPANY_TERM:                  # терминирующее слово
+            break
+        if not out and low in _COMPANY_STOP:
             continue                               # ведущие предлоги/служебные
         out.append(tok)
     cleaned = " ".join(out).strip(" «»\"'")
-    return cleaned if len(cleaned) >= 2 else None
+    return cleaned if len(cleaned) >= 2 and cleaned.lower() not in _ORG_SUFFIX else None
 
 # Идентификаторы, под которые НЕТ ни одного сервера в реестре. Ловим их явно,
 # чтобы честно сказать «не поддерживается», а не гонять общий веб-поиск и
@@ -110,7 +136,7 @@ def detect_targets(task: str) -> list[dict]:
         parts = v.split(".")
         if all(0 <= int(p) <= 255 for p in parts):
             add("ip", v)
-    for v in RE_INN.findall(task):
+    for v in inn_values(task):
         add("inn", v)
     for v in RE_TICKER.findall(task):
         add("ticker", v)
@@ -125,6 +151,18 @@ def detect_targets(task: str) -> list[dict]:
             if name:
                 add("company", name)
 
+    # Международные правовые формы: «Indra Sistemas SA», «Siemens AG», «Apple Inc».
+    # Не берём строки, которые уже ушли в домены/URL (напр. «indracompany.com»).
+    _already_domain = {x["value"].lower() for x in found if x["type"] in ("domain", "url")}
+    for m in RE_INT_ORG.finditer(task):
+        full = m.group(0).strip(" ,;.")
+        if not any(ad in full.lower() for ad in _already_domain):
+            name = _clean_company(full)
+            if name and len(name.split()) >= 2:
+                # Международный regex не должен захватывать русскую вводную фразу.
+                if not any(x["type"] == "company" and full.lower().endswith(x["value"].lower()) for x in found):
+                    add("company", name)
+
     # Явный username: "username X", "ник X", "@handle"
     m = re.search(r"(?:username|ник|никнейм|user)\s+@?([a-zA-Z0-9_.]{2,30})", task, re.I)
     if m:
@@ -132,13 +170,18 @@ def detect_targets(task: str) -> list[dict]:
     for m in re.finditer(r"(?<!\S)@([a-zA-Z0-9_.]{2,30})", task):
         add("username", m.group(1))
 
-    # Голый ник: ничего конкретного не нашли, но есть латинский токен —
-    # для OSINT это почти всегда username («проверь durov», «кто такой durov»).
+    # Голый токен без явного типа («Meta», «Siemens», «durov») неоднозначен:
+    # это может быть ник ЛИБО бренд/компания. Раньше брали только username — и на
+    # «Meta» (модель часто обрезает «компанию Meta» до «Meta») выходил пустой отчёт.
+    # Теперь исследуем и как username, и как company: реестры (GLEIF/SEC) строго
+    # матчатся, домен проверяется резолвингом — для бренда это даёт богатое досье,
+    # для ника «компания»-путь просто вернёт пусто (username через maigret работает).
     if not found:
         for tok in RE_LATIN_TOKEN.findall(task):
             if tok.lower() in _STOPWORDS:
                 continue
             add("username", tok)
+            add("company", tok)
             break
 
     return found
@@ -239,7 +282,7 @@ CURATED: dict[tuple[str, str], tuple[str, object]] = {
     ("domain", "shodan"): ("dns_lookup", lambda v: {"hostnames": [v]}),
     ("domain", "virustotal"): ("get_domain_report", lambda v: {"domain": v}),
     ("domain", "openosint"): ("search_domain", lambda v: {"domain": v}),
-    ("domain", "dnstwist"): ("fuzz_domain", lambda v: {"domain": v, "registered_only": True}),
+    ("domain", "dnstwist"): ("fuzz_domain", lambda v: {"domain": v, "registered_only": True, "mxcheck": False, "banners": False, "threads": 30}),
     ("ip", "shodan"): ("ip_lookup", lambda v: {"ip": v}),
     ("ip", "virustotal"): ("get_ip_report", lambda v: {"ip": v}),
     ("ip", "openosint"): ("search_ip", lambda v: {"ip": v}),
@@ -252,7 +295,10 @@ CURATED: dict[tuple[str, str], tuple[str, object]] = {
         lambda v: {"inn": v} if len(v) == 10 else {"__tool__": "get_entrepreneur", "inn": v}),
     # Компания по НАЗВАНИЮ — поиск по наименованию (это корректно для имени).
     ("company", "checko"): ("search", lambda v: {"by": "name", "obj": "org", "query": v}),
+    ("company", "opencorporates"): ("opencorporates_search", lambda v: {"query": v}),
     ("company", "companyscope"): ("lookup_company", lambda v: {"query": v}),
+    # Деловые СМИ (Reuters/Bloomberg/RBC) — новости и события по компании.
+    ("company", "googlesearch"): ("web_search", lambda v: {"query": v, "engine": "news"}),
     ("inn", "companyscope"): ("lookup_company", lambda v: {"query": v}),
     ("ticker", "stockscope"): ("stock_financials", lambda v: {"query": v}),
     # Домен — дополнительные углы (не только Shodan/VirusTotal):
@@ -292,6 +338,12 @@ CURATED: dict[tuple[str, str], tuple[str, object]] = {
     ("domain", "directapi"): ("rdap_domain", lambda v: {"domain": v}),
     ("ip", "directapi"): ("rdap_ip", lambda v: {"ip": v}),
     ("company", "directapi"): ("gleif_entity", lambda v: {"query": v}),
+    # Google CSE под тип цели: ник→люди, почта→паст-сайты(утечки), запрос→сайты/соц/gov.
+    ("username", "directapi"): ("google_cse", lambda v: {"query": v, "engine": "people"}),
+    ("email", "directapi"): ("google_cse", lambda v: {"query": v, "engine": "pastebin"}),
+    ("query", "directapi"): ("google_cse", lambda v: {"query": v, "engine": "sites_social_gov"}),
+    # yfinance для европейских/мировых бирж (IBEX35, LSE, XETRA, Euronext).
+    ("ticker", "directapi"): ("stock_quote", lambda v: {"ticker": v}),
 }
 
 # --- Глубокое досье по домену/IP: набор ПРИКреплённых вызовов (server, tool, args) ---
@@ -322,9 +374,23 @@ def deep_domain_steps(v: str, vt_rel_cap: int) -> list[tuple[str, str, dict]]:
         ("directapi", "rdap_domain", {"domain": v}),               # регистрация/NS/статусы
         ("directapi", "crtsh", {"domain": v}),                     # CT-поддомены (best-effort)
         ("directapi", "dns_records", {"domain": v}),               # A/MX/NS/TXT + SPF/DMARC
-        ("directapi", "whois_history", {"domain": v}),             # WhoisXML (ключ) — история
-        ("directapi", "censys_domain", {"domain": v}),             # Censys (ключ) — инфраструктура
+        ("whoisxml", "whois_history", {"domain": v}),              # история WHOIS (выделенный сервер)
+        ("whoisxml", "whois_current", {"domain": v}),              # текущий WHOIS (фолбэк для rdap)
+        ("censys", "censys_domain", {"domain": v}),                # Censys (ключ) — инфраструктура
+        ("directapi", "web_inspect", {"domain": v}),               # web-check: заголовки/безопасность
+        ("directapi", "google_cse", {"query": v, "engine": "pastebin"}),  # утечки с упоминанием домена
+        # ---- дополнительные источники ----
+        ("voidly", "get_domain_status", {"domain": v}),            # блокировки/репутация по странам
+        ("voidly", "get_domain_history", {"domain": v}),           # история инцидентов домена
+        ("dnstwist", "fuzz_domain", {"domain": v, "registered_only": True, "mxcheck": False, "banners": False, "threads": 30}),  # тайпсквоттинг
+        ("openosint", "search_domain", {"domain": v}),             # OpenOSINT агрегация
+        ("zoomeye", "zoomeye_search",                              # ZoomEye — хосты домена
+         {"qbase64": __import__("base64").b64encode(f'hostname:"{v}"'.encode()).decode()}),
+        ("googlesearch", "web_search", {"query": v, "engine": "news"}),    # деловые новости
+        ("googlesearch", "web_search", {"query": v, "engine": "leaks"}),   # утечки/базы данных
+        ("googlesearch", "web_search", {"query": v, "engine": "social"}),  # соцсети
     ]
+    # dns_records уже проверяет стандартные DKIM-селекторы одним вызовом.
     return steps
 
 
@@ -334,7 +400,7 @@ def deep_ip_steps(v: str, vt_rel_cap: int) -> list[tuple[str, str, dict]]:
         ("shodan", "ip_lookup", {"ip": v}),
         ("virustotal", "get_ip_report", {"ip": v}),
         ("directapi", "rdap_ip", {"ip": v}),                       # сеть/AS/организация
-        ("directapi", "censys_host", {"ip": v}),                   # Censys (ключ) — порты/сервисы
+        ("censys", "censys_host", {"ip": v}),                      # Censys (ключ) — порты/сервисы
     ]
     for rel in ["resolutions", "communicating_files"][:max(0, vt_rel_cap)]:
         steps.append(("virustotal", "get_ip_relationship",
@@ -342,22 +408,98 @@ def deep_ip_steps(v: str, vt_rel_cap: int) -> list[tuple[str, str, dict]]:
     return steps
 
 
-def deep_company_steps(name: str) -> list[tuple[str, str, dict]]:
+RE_CYRILLIC = re.compile(r"[а-яёА-ЯЁ]")
+
+
+def looks_russian(name: str, task: str = "", jurisdiction: str = "") -> bool:
+    """Есть ли смысл спрашивать российский ЕГРЮЛ. Checko платный и по зарубежной
+    компании гарантированно отдаёт пустой результат — раньше он всё равно уходил
+    в каждый веер и просто раздувал знаменатель «ответили N из M»."""
+    if jurisdiction:
+        return jurisdiction.upper().startswith("RU")
+    if RE_CYRILLIC.search(name or ""):
+        return True
+    return bool(inn_values(task)) or bool(RE_ORG.search(task or ""))
+
+
+def deep_company_steps(name: str, identity: dict | None = None, *,
+                       task: str = "", allow_paid: bool = False) -> list[tuple[str, str, dict]]:
     """Батарея вызовов «корпоративного» слоя досье по компании (юр. идентичность,
-    структура, должностные лица, санкции, отчётность). Инфраструктурный слой
-    (домены → deep_domain_steps) добавляется отдельно в server.py после резолвинга
-    доменов. Серверы не из каталога пропускаются в build_plan."""
+    структура, отчётность, финансы, санкции). Инфраструктурный слой (домены →
+    deep_domain_steps) добавляется отдельно в server.py. Серверы не из каталога
+    пропускаются в build_plan.
+
+    name — КАНОНИЧЕСКОЕ юр. имя из entity.resolve (не разговорная строка запроса):
+    реестры сравнивают имена буквально, и «Meta» находила датскую однодневку.
+    identity даёт точные ключи (LEI/CIK/тикер/юрисдикция) — по ним реестр отвечает
+    однозначно, без сопоставления строк."""
+    ident = identity or {}
+    lei, tickers = ident.get("lei"), (ident.get("tickers") or [])
+    jur = ident.get("jurisdiction") or ""
     # Прим.: filingfirehose (SEC 8-K) НЕ включаем — его search_8k_filings отдаёт
     # свежие отчёты ПО РЫНКУ, а не по конкретной компании (был бы шум чужих эмитентов).
-    return [
-        ("directapi", "gleif_entity", {"query": name}),            # LEI: идентичность + связи
+    steps: list[tuple[str, str, dict]] = [
+        # LEI-код точнее имени: прямая карточка вместо сопоставления строк.
+        ("directapi", "gleif_entity", {"query": lei or name}),
+        ("directapi", "sec_edgar", {"query": ident.get("cik") or (tickers[0] if tickers else name)}),
+        ("directapi", "wikipedia_summary", {"query": name}),
+        # Один веб-поиск на слой, и по СУЩНОСТИ, а не по паст-сайтам: движок
+        # pastebin рассчитан на почты/ники, а на имени-существительном («Meta»)
+        # давал десять страниц чужих паст. Доменный pastebin-дорк остаётся —
+        # он привязан к проверенному домену и потому точен.
+        ("directapi", "google_cse", {"query": name, "engine": "docs_orgs"}),
         # opencorporates_officers здесь НЕ зовём: без юрисдикции одно и то же имя
         # ловит чужую регистрацию (INDRA SISTEMAS есть и в ES, и в ca_qc). Его
-        # вызывает вторая волна в server.py — по ЮРИДИЧЕСКОМУ имени и стране из GLEIF.
-        ("companyscope", "lookup_company", {"query": name}),        # сводка из открытых источников
-        ("checko", "search", {"by": "name", "obj": "org", "query": name}),  # РФ ЕГРЮЛ (если RU)
-        ("the-stall", "sanctions-screening", {"name": name, "type": "entity"}),  # санкции OFAC
+        # вызывает вторая волна в server.py — по ЮРИДИЧЕСКОМУ имени и стране.
+        ("companyscope", "lookup_company", {"query": name}),
+        # Деловые новости: последние события, смены руководства, сделки (Serper/Google).
+        ("googlesearch", "web_search", {"query": name, "engine": "news"}),
+        # Международные реестры — компании с операциями в Великобритании + утечки OCCRP.
+        ("directapi", "uk_companies_house", {"query": lei or name}),
+        ("directapi", "aleph_search", {"query": lei or name}),
     ]
+    # Испанский реестр (BORME) — CIF, директора, апoderados.
+    # libreborme.net временно недоступен (Cloudflare), добавляем gov-docs поиск как фолбэк.
+    if jur.lower().startswith("es"):
+        steps.insert(0, ("directapi", "borme_publications", {"query": name}))
+        steps.append(("googlesearch", "web_search",
+                      {"query": f"{name} Consejo Administración directivos BOE BORME",
+                       "engine": "docs_orgs"}))
+    # Финансы по годам (выручка/прибыль/активы) из XBRL SEC — keyless.
+    # stockscope сюда НЕ ставим: он на каждый запрос (включая AAPL) отвечает
+    # «No SEC data found … Only US public companies are supported», т.е. как
+    # источник финансов не работает. Тикер/имя даёт фаза резолвинга.
+    if tickers or ident.get("cik"):
+        steps.append(("directapi", "sec_financials",
+                      {"query": ident.get("cik") or (tickers[0] if tickers else name)}))
+    # Глобальные котировки (yfinance) — для бирж вне SEC (IBEX35, LSE, XETRA и т.д.).
+    if tickers:
+        steps.append(("directapi", "stock_quote", {"ticker": tickers[0]}))
+    elif jur:
+        # Авто-поиск тикера для публичных компаний без известного тикера.
+        # Биржевой суффикс по юрисдикции: ES→.MC, DE→.DE, FR→.PA, GB→.L и т.д.
+        _EXCHANGE_SUFFIX = {"es": ".MC", "de": ".DE", "fr": ".PA", "gb": ".L",
+                            "it": ".MI", "nl": ".AS", "ch": ".SW", "au": ".AX"}
+        jur2 = jur.lower()[:2]
+        if jur2 in _EXCHANGE_SUFFIX:
+            steps.append(("directapi", "stock_ticker_lookup", {"query": name}))
+    if looks_russian(name, task, jur):
+        inn = ident.get("inn")
+        if inn:
+            steps.append(("checko", "get_company", {"inn": inn}))
+            steps.append(("checko", "get_finances", {"inn": inn}))
+        else:
+            steps.append(("checko", "search", {"by": "name", "obj": "org", "query": name}))
+    # Национальные реестры относятся к выбранному юрлицу, не к одноимённым филиалам.
+    if jur and not jur.upper().startswith("GB"):
+        steps = [st for st in steps if st[1] != "uk_companies_house"]
+    if jur and not jur.upper().startswith("US") and not ident.get("cik"):
+        steps = [st for st in steps if st[1] not in ("sec_edgar", "sec_financials")]
+    if allow_paid:
+        # x402: почти всегда «нужна оплата». Без ключа это гарантированный сбой,
+        # который портил и статистику покрытия, и раздел «Ограничения данных».
+        steps.append(("the-stall", "sanctions-screening", {"name": name, "type": "entity"}))
+    return steps
 
 # Предпочтительный порядок серверов на тип цели (curated сначала). Ограничивает
 # веер, чтобы не звать каждый сервер и не плодить ошибки платных без ключа.
@@ -371,8 +513,8 @@ def deep_company_steps(name: str) -> list[tuple[str, str, dict]]:
 # чистые API-вызовы (~5–20 с). docker-run остаётся только у maigret (username/
 # email). Остальные серверы доступны ВРУЧНУ в панели MCP (call_server).
 PREFERRED: dict[str, list[str]] = {
-    "username": ["maigret"],            # единственный источник; ~60с (docker run)
-    "email": ["maigret", "openosint"],  # openosint(holehe) быстрый
+    "username": ["maigret", "directapi"],       # аккаунты (maigret) + люди (Google CSE)
+    "email": ["maigret", "openosint", "directapi"],  # + паст-сайты/утечки (Google CSE)
     # domain/ip в авто-режиме идут ГЛУБОКИМ веером (deep_domain_steps/deep_ip_steps
     # в server.py). PREFERRED здесь — фолбэк на случай выключенного deep-режима.
     "domain": ["shodan", "virustotal", "directapi"],
@@ -381,8 +523,8 @@ PREFERRED: dict[str, list[str]] = {
     "hash": ["virustotal"],
     "phone": ["contrastapi"],
     "inn": ["checko"],
-    "company": ["checko", "directapi"],  # ЕГРЮЛ/ЕГРИП (RU) + GLEIF (глобальный реестр LEI)
-    "ticker": ["stockscope", "the-stall"],  # оба API; the-stall даёт данные
+    "company": ["checko", "directapi", "opencorporates", "googlesearch"],  # RU + GLEIF + реестр + новости
+    "ticker": ["stockscope", "directapi", "the-stall"],  # US (SEC) + глобальный (yfinance) + x402
     "crypto": ["twzrd"],                # Solana intel-score
-    "query": ["datanexus", "bgpt"],     # быстрый общий поиск
+    "query": ["datanexus", "bgpt", "directapi"],  # общий поиск + Google CSE (сайты/соц/gov)
 }

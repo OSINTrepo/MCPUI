@@ -33,12 +33,17 @@ servers:
     build: servers/orchestrator
     stdio_command: "python /app/server.py"
     env:
+      ORCHESTRATOR_ENTITY_MIN_SCORE: "${ORCHESTRATOR_ENTITY_MIN_SCORE:-3}"
+      ORCHESTRATOR_APPENDIX: "${ORCHESTRATOR_APPENDIX:-slim}"
+      ORCHESTRATOR_PAID_SOURCES: "${ORCHESTRATOR_PAID_SOURCES:-0}"
+      ORCHESTRATOR_RESOLVE_DEADLINE: "${ORCHESTRATOR_RESOLVE_DEADLINE:-45}"
+      ORCHESTRATOR_ENTITY_RESOLVE: "${ORCHESTRATOR_ENTITY_RESOLVE:-1}"
+      ORCHESTRATOR_COMPANY_DOMAINS: "${ORCHESTRATOR_COMPANY_DOMAINS:-1}"
       LITELLM_BASE_URL: "http://litellm:4000/v1"
       # Модель подбора серверов и модель-писатель отчёта — из .env (по умолчанию
-      # GigaChat). REPORT_MODEL меняют на deepseek-chat / claude-opus-4-8 для
-      # аналитически более сильного и точного досье.
-      ORCHESTRATOR_MODEL: "${ORCHESTRATOR_MODEL:-GigaChat-2-Pro}"
-      ORCHESTRATOR_REPORT_MODEL: "${ORCHESTRATOR_REPORT_MODEL:-GigaChat-2-Pro}"
+      # deepseek-flash, как в проверенных досье). Модели можно менять независимо.
+      ORCHESTRATOR_MODEL: "${ORCHESTRATOR_MODEL:-deepseek-flash}"
+      ORCHESTRATOR_REPORT_MODEL: "${ORCHESTRATOR_REPORT_MODEL:-deepseek-flash}"
       ORCHESTRATOR_DOMAIN_DEEP: "${ORCHESTRATOR_DOMAIN_DEEP:-1}"
       # 4 связи VT: resolutions, subdomains, historical_ssl_certificates,
       # communicating_files. historical_whois (5-я) не берём — историю регистрации
@@ -46,7 +51,7 @@ servers:
       ORCHESTRATOR_VT_RELATIONSHIPS: "${ORCHESTRATOR_VT_RELATIONSHIPS:-4}"
       LITELLM_MASTER_KEY: "${LITELLM_MASTER_KEY}"
       REPORTS_DIR: "/reports"
-      REPORTS_URL_BASE: "http://localhost:8899"   # адрес reports-сервиса (см. docker-compose.yml)
+      REPORTS_URL_BASE: "${REPORTS_URL_BASE:-http://localhost:8899}"   # адрес, доступный браузеру пользователя
     volumes:
       - ./config/catalog.json:/app/catalog.json:ro
       - ./reports:/reports
@@ -145,7 +150,7 @@ servers:
     transport: stdio
     install: docker
     build: servers/zoomeye
-    stdio_command: "uvx mcp-server-zoomeye"
+    stdio_command: "uvx --offline --with httpx --with 'mcp==1.15.0' mcp-server-zoomeye"
     auth:
       type: api_key
       user_var: ZOOMEYE_API_KEY
@@ -220,6 +225,10 @@ servers:
     # отвечают «нужен ключ».
     stdio_command: "python /app/server.py"
     env:
+      GOOGLE_CSE_DEFAULT_CX: "${GOOGLE_CSE_DEFAULT_CX:-}"
+      GOOGLE_CSE_API_KEY: "${GOOGLE_CSE_API_KEY:-}"
+      WHOXY_API_KEY: "${WHOXY_API_KEY:-}"
+      SERPER_API_KEY: "${SERPER_API_KEY:-}"
       CENSYS_PAT: "${CENSYS_PAT:-}"
       CENSYS_ORG_ID: "${CENSYS_ORG_ID:-}"
       WHOISXML_API_KEY: "${WHOISXML_API_KEY:-}"
@@ -301,7 +310,7 @@ servers:
     cost_tier: free
     inputs: [company]
     repo: https://github.com/Stewyboy1990/companyscope-mcp
-    enabled: true
+    enabled: false
 
   - id: checko
     category: company
@@ -314,7 +323,7 @@ servers:
     # Пинуем mcp: checko-mcp 0.1.0 объявляет mcp>=1.0, а uvx тянет latest (1.28+),
     # где убрали re-export mcp.server.Server.list_tools → сервер падал на старте
     # («No valid session ID» на все вызовы). 1.15.0 — последняя рабочая для него.
-    stdio_command: "uvx --with 'mcp==1.15.0' checko-mcp"
+    stdio_command: "uvx --offline --with 'mcp==1.15.0' checko-mcp"
     auth:
       type: api_key
       user_var: CHECKO_API_KEY
@@ -400,7 +409,7 @@ servers:
     # MCP-режим отдаёт 18 инструментов без LLM-ключа (ключ Anthropic нужен только
     # для отдельного agent-режима). Часть инструментов требует опц. ключей
     # (HIBP/SHODAN/VT) — работают и без них на доступном подмножестве.
-    stdio_command: "uvx --from openosint openosint-mcp"
+    stdio_command: "uvx --offline --from openosint --with 'mcp==1.15.0' --with sublist3r openosint-mcp"
     auth:
       type: none
       user_var: null
@@ -435,12 +444,14 @@ servers:
     transport: http
     install: remote
     url: https://domscan.net/mcp
-    # Keyless по умолчанию (работает + 10k бесплатных кредитов/мес). Чтобы поднять
-    # лимиты ключом (dsk_...): смените auth.type на api_key и добавьте
-    # user_var: DOMSCAN_API_KEY, query_param: api_key (ключ уйдёт в URL ?api_key=).
+    # Проверено 2026-09-10: без авторизации HTTP 401. Для headless-клиента — API key.
+    # https://domscan.net/mcp-domain-checker (OAuth либо API key).
+    key_help: "Ключ DomScan: domscan.net/dashboard/api-keys. Анонимный MCP возвращает 401."
     auth:
-      type: none
-      user_var: null
+      type: api_key
+      user_var: DOMSCAN_API_KEY
+      header: X-API-Key
+      scheme: ""
     cost_tier: freemium
     inputs: [domain]
     repo: https://domscan.net
@@ -587,3 +598,84 @@ servers:
   # osint-agent-skills (github.com/frangelbarrera/osint-agent-skills) — это база
   # знаний (методологии, реестры инструментов, шаблоны отчётов), а НЕ MCP-сервер.
   # Не подключается как сервер; используется как справочные материалы.
+
+  - id: censys
+    category: network
+    display_name: Censys Platform
+    description: Порты, сервисы, сертификаты и поиск инфраструктуры Censys.
+    transport: stdio
+    install: docker
+    build: servers/censys
+    stdio_command: python /app/server.py
+    env:
+      CENSYS_ORG_ID: ${CENSYS_ORG_ID:-}
+    auth:
+      type: api_key
+      user_var: CENSYS_PAT
+    cost_tier: freemium
+    inputs:
+    - ip
+    - domain
+    repo: local
+    enabled: true
+
+  - id: whoisxml
+    category: network
+    display_name: WhoisXML History
+    description: История регистрации доменов; WhoisXML и резервный Whoxy.
+    transport: stdio
+    install: docker
+    build: servers/whoisxml
+    stdio_command: python /app/server.py
+    env:
+      WHOXY_API_KEY: ${WHOXY_API_KEY:-}
+    auth:
+      type: api_key
+      user_var: WHOISXML_API_KEY
+    cost_tier: freemium
+    inputs:
+    - domain
+    repo: local
+    enabled: true
+
+  - id: opencorporates
+    category: company
+    display_name: OpenCorporates
+    description: Поиск юридических лиц и должностных лиц в реестрах.
+    transport: stdio
+    install: docker
+    build: servers/opencorporates
+    stdio_command: python /app/server.py
+    env: {}
+    auth:
+      type: api_key
+      user_var: OPENCORPORATES_API_KEY
+    cost_tier: freemium
+    inputs:
+    - company
+    repo: local
+    enabled: true
+
+  - id: googlesearch
+    category: research
+    display_name: Google Search
+    description: Тематический веб-поиск через Serper или Google CSE.
+    transport: stdio
+    install: docker
+    build: servers/googlesearch
+    stdio_command: python /app/server.py
+    env:
+      GOOGLE_CSE_API_KEY: ${GOOGLE_CSE_API_KEY:-}
+      GOOGLE_CSE_DEFAULT_CX: ${GOOGLE_CSE_DEFAULT_CX:-}
+    auth:
+      type: api_key
+      user_var: SERPER_API_KEY
+    cost_tier: freemium
+    inputs:
+    - query
+    - company
+    - domain
+    - email
+    - username
+    repo: local
+    enabled: true

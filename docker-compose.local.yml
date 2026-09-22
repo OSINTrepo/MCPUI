@@ -1,0 +1,24 @@
+# Локальный вывод LLM. Использовать ПОСЛЕ базового и сгенерированного Compose.
+# Запуск требует --profile local-llm. NVIDIA добавляется отдельным GPU-файлом.
+services:
+  # Локальный стенд не запускает облачный прокси без учётных данных.
+  gigachat-proxy:
+    profiles: ["cloud-gigachat"]
+  litellm:
+    depends_on: !reset []
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+  orchestrator:
+    environment:
+      ORCHESTRATOR_MODEL: qwen2.5-14b
+      ORCHESTRATOR_REPORT_MODEL: qwen2.5-14b
+  ollama:
+    environment:
+      OLLAMA_CONTEXT_LENGTH: "32768"
+      OLLAMA_NUM_PARALLEL: "1"
+      OLLAMA_MAX_LOADED_MODELS: "1"
+      OLLAMA_KEEP_ALIVE: "30m"
+  ollama-init:
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - "until ollama list >/dev/null 2>&1; do sleep 2; done; ollama pull qwen2.5:14b"

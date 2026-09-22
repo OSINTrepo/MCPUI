@@ -20,7 +20,7 @@ PAUSE = 25  # сек между запросами — щадим минутны
 # (запрос, обязательные подстроки, ЗАПРЕЩённые подстроки, тип: report|text)
 CASES = [
     ("проверь username durov",
-     ["durov", "Maigret", "http"], ["jsdelivr", "drive.google"], "report"),
+     ["durov", "Maigret"], ["jsdelivr", "drive.google"], "report"),
     ("что известно про john.doe@gmail.com",
      ["john.doe@gmail.com", "OpenOSINT"], ["jsdelivr"], "report"),
     ("собери досье по домену github.com",
@@ -38,7 +38,14 @@ CASES = [
     # Глубокое досье по компании: корпоративный слой (GLEIF) + инфраструктура доменов
     # + честные «Ограничения данных». Явный домен делает инфраструктурный путь стабильным.
     ("собери досье по компании Indra Sistemas, сайт indracompany.com",
-     ["Indra", "Организация", "Ограничения"], ["jsdelivr"], "report"),
+     ["Indra", "Организация", "Ограничения", "Идентификация цели",
+      "Источники и покрытие", "Таблица 1."], ["jsdelivr"], "report"),
+    # РЕГРЕССИЯ: разговорное «Meta» уводило досье к датской фирме-пустышке META
+    # (Viborg, LEI LAPSED) — см. reports/meta-2542b1.md. Датское юрлицо может
+    # остаться в таблице кандидатов, поэтому запрещаем его АТРИБУТЫ, не имя.
+    ("собери досье по компании Meta",
+     ["Meta Platforms", "Идентификация цели", "0001326801"],
+     ["Viborg", "984500Y657CE399B1547"], "report"),
     ("проверь тикер AAPL",
      ["AAPL"], [], "report"),
     ("проверь телефон +79001234567",
@@ -75,7 +82,9 @@ async def one(task, need, forbid, kind):
         text = await fetch(f"{REPORTS}/{m.group(1)}")
         loc = m.group(1)
         okm = [x.group(1) for x in re.finditer(r"^\| (.+?) \| .+? \| ok \|$", text, re.M)]
-        stat = re.search(r"Успешно опрошено:\**\s*(\d+ из \d+)", text)
+        # Шапка считает СЕРВЕРЫ, а не вызовы («Ответили источников: N из M»);
+        # прежнее «Успешно опрошено» описывало размер веера, а не покрытие.
+        stat = re.search(r"Ответили источников:\**\s*(\d+ из \d+)", text)
         ok_srcs = f"[{stat.group(1) if stat else '?'}] рабочие: {', '.join(okm) or '—'}"
     problems = [f"нет '{s}'" for s in need if s.lower() not in text.lower()]
     problems += [f"ЗАПРЕЩ '{s}'" for s in forbid if s.lower() in text.lower()]

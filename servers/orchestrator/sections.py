@@ -74,7 +74,9 @@ def render_target(kind: str, data: dict, ctx: dict | None = None) -> list[str]:
             block = s.render(data, ctx) or []
             if block:
                 block = _number_tables(block, ctx["_tno"])
-                c = comments.get(s.id)
+                # Финансовые суммы и единицы уже проверены в таблице.
+                # Свободный пересказ LLM может перепутать миллионы и миллиарды.
+                c = None if s.id == "c_financials" else comments.get(s.id)
                 if c:
                     block = block + [f"**Вывод:** {c}", ""]
                 md += block
@@ -750,6 +752,9 @@ def _c_identity(data, ctx):
             ["Официальные домены", ", ".join(ident.get("domains") or []) or None],
             ["Независимых подтверждений", str(ident.get("confirms", 0))],
             ["Уверенность", ident.get("confidence")]]
+    for key, label in (("inn", "ИНН"), ("ogrn", "ОГРН")):
+        if ident.get(key):
+            rows.insert(2, [label, ident[key]])
     md += D._md_table(["Параметр", "Значение"], rows) + [""]
     cands = [c for c in (ident.get("candidates") or [])
              if c.get("sources") != ["query"]]
@@ -793,7 +798,7 @@ def _c_checko(data, ctx):
         ["ОГРН", ck.get("ogrn")], ["КПП", ck.get("kpp")],
         ["Статус", ck.get("status")], ["Дата регистрации", ck.get("registered")],
         ["Юр. адрес", ck.get("address")], ["ОКВЭД", ck.get("okved")],
-        ["Уставный капитал", str(ck.get("capital")) if ck.get("capital") else None],
+        ["Уставный капитал (RUB)", str(ck.get("capital")) if ck.get("capital") is not None else None],
         ["Руководитель", ck.get("director")],
         ["Учредители", ", ".join(ck.get("founders") or []) or None],
     ]) + [""]
@@ -865,8 +870,18 @@ def _c_financials(data, ctx):
             for label, series in (fin.get("metrics") or {}).items():
                 rows.append([label] + [_fmt_money(series.get(y)) for y in years])
             md += D._md_table(["Показатель"] + years, rows) + [""]
+            if fin.get("period_basis") == "period_end":
+                md += ["_Столбцы — даты окончания годовых периодов; сравнительные данные относятся к своему периоду, не к году подачи отчёта._", ""]
+            identifier = f"ИНН {fin['inn']}" if fin.get("inn") else f"CIK {fin.get('cik')}"
             md += [f"_Источник: {fin.get('source', 'SEC XBRL')}; "
-                   f"эмитент {fin.get('name')} (CIK {fin.get('cik')})._", ""]
+                   f"эмитент {fin.get('name')} ({identifier})._", ""]
+            if fin.get("scope"):
+                md += [f"**Охват:** {fin['scope']}", ""]
+            if fin.get("source_url"):
+                md += [f"[Источник данных]({fin['source_url']})", ""]
+            for year, url in (fin.get("documents") or {}).items():
+                md += [f"- [Официальная отчётность ФНС за {year}]({url})"]
+            md += [""]
     # Биржевые данные от StockScope (когда SEC/Yahoo Finance недоступны)
     if fin_raw and not fin and not sq:
         md += ["## Финансовые данные (биржа)", "", "```", str(fin_raw).strip()[:1800], "```", ""]
@@ -939,6 +954,8 @@ def _c_structure(data, ctx):
 def _c_officers(data, ctx):
     off = data.get("officers")
     if not (off and off.get("officers")):
+        if (data.get("checko") or {}).get("director") or (data.get("official") or {}).get("people"):
+            return []  # Руководство уже показано из реестра/официального сайта.
         # Источник упал ≠ должностных лиц нет. Раньше Connectify/401 у
         # OpenCorporates молча превращался в утверждение «руководство
         # отсутствует» — фабрикация отрицательного факта из сбоя инструмента.

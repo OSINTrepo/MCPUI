@@ -84,6 +84,8 @@ services:
     env_file: .env
     environment:
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
+      QWEN_API_BASE: ${QWEN_API_BASE:-https://dashscope-intl.aliyuncs.com/compatible-mode/v1}
+      QWEN_TOKEN_PLAN_API_BASE: ${QWEN_TOKEN_PLAN_API_BASE:-https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1}
       LITELLM_LOCAL_MODEL_COST_MAP: "True"   # не тянуть карту цен из сети при старте
     volumes:
       - ./litellm/config.yaml:/app/config.yaml:ro

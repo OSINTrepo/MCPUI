@@ -210,7 +210,7 @@ def build_catalog(servers: list[dict]) -> list[dict]:
     catalog = []
     for s in servers:
         auth = s.get("auth") or {}
-        needs_key = auth.get("type") in {"api_key", "oauth"}
+        needs_key = auth.get("type") in {"api_key", "oauth"} and not s.get("anonymous_ok", False)
         # MCP-эндпоинт, по которому оркестратор зовёт сервер:
         #   stdio -> внутренний http://<id>:8000/mcp; remote -> публичный url.
         if s["transport"] == "stdio":

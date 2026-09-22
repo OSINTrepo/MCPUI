@@ -6,6 +6,7 @@ import dossier as D
 
 TITLES = {
     'overview': 'Общая информация и масштаб деятельности',
+    'governance': 'Корпоративное управление: опубликованные сведения',
     'business': 'Бизнес-структура и направления деятельности',
     'legal': 'Юридические сведения с официального сайта',
     'locations': 'Штаб-квартира и географическое присутствие',
@@ -19,15 +20,27 @@ def normalize(s):
     return ' '.join(str(s or '').split()).casefold()
 
 
+def russian_fact(text: str) -> bool:
+    """Минимальная проверка языка перевода; оригинал остаётся в quote."""
+    return len(re.findall(r"[А-Яа-яЁё]", text)) >= 3
+
+
 def verified_claims(candidate: dict, pages: list[dict]) -> list[dict]:
     """LLM может переводить факты, но обязан предъявить точную цитату и её URL."""
     sources = {p['url']: normalize(p.get('text')) for p in pages}
+    document_years = {}
+    for page in pages:
+        years = set(re.findall(r'\b20\d{2}\b', page.get('title', '')))
+        if page.get('category') == 'annual' and len(years) == 1:
+            document_years[page['url']] = next(iter(years))
     out = []
     for c in candidate.get('claims', []) if isinstance(candidate, dict) else []:
         if not isinstance(c, dict) or c.get('section') not in TITLES:
             continue
         quote, fact, url = c.get('quote'), c.get('text'), c.get('url')
         if not isinstance(quote, str) or not isinstance(fact, str):
+            continue
+        if not russian_fact(fact):
             continue
         if len(quote) < 20 or len(quote) > 1200 or len(fact) > 900:
             continue
@@ -37,7 +50,11 @@ def verified_claims(candidate: dict, pages: list[dict]) -> list[dict]:
         digits = re.findall(r'\d+', fact)
         if any(n not in re.findall(r'\d+', quote) for n in digits):
             continue
-        out.append({k: c[k] for k in ('section', 'text', 'quote', 'url')})
+        record = {k: c[k] for k in ('section', 'text', 'quote', 'url')}
+        if url in document_years:
+            record['document_year'] = document_years[url]
+        if record not in out:
+            out.append(record)
     return out[:35]
 
 
@@ -101,14 +118,15 @@ def render(data, ctx):
             continue
         md += ['## ' + title, '']
         for c in rows:
-            md += [f"- {c['text']} [Источник]({c['url']})"]
+            period = f" _(годовой отчёт за {c['document_year']})_" if c.get("document_year") else ""
+            md += [f"- {c['text']}{period} [Источник]({c['url']})"]
         md += ['']
     people = source.get('people') or []
     groups = list(dict.fromkeys(p['group'] for p in people))
     for group in groups:
         rows = [p for p in people if p['group'] == group]
-        label = ('Совет директоров' if group.lower() == 'consejo de administración' else
-                 'Исполнительное руководство' if group.lower() == 'comité de dirección' else 'Комитет')
+        label = ('Совет директоров' if group.lower() in ('consejo de administración', 'board of directors') else
+                 'Исполнительное руководство' if group.lower() in ('comité de dirección', 'executive team', 'executive committee', 'equipo ejecutivo') else 'Комитет')
         md += [f'## {label} — {group}', '',
                f"_Официальный сайт, чтение {rows[0].get('retrieved_at') or source.get('retrieved_at', '')}. "
                'Состав на дату чтения; не архив назначений._', '']

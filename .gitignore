@@ -24,3 +24,6 @@ venv/
 # --- misc ---
 .DS_Store
 scratchpad/
+
+# --- резервные копии базы и ключей ---
+backups/

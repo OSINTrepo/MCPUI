@@ -64,8 +64,21 @@ class PipelineTests(unittest.TestCase):
         good = dict(section='financial', text='Выручка 2025: EUR 500 million.',
                     quote=pages[0]['text'], url=url)
         bad = dict(good, text='Выручка 2025: EUR 900 million.')
+        untranslated = dict(good, text="Revenue in 2025 was EUR 500 million.")
+        self.assertEqual(official.verified_claims({"claims": [untranslated]}, pages), [])
         foreign = dict(good, url='https://other.org/')
         self.assertEqual(official.verified_claims({'claims': [good,bad,foreign]}, pages), [good])
+
+    def test_annual_claim_retains_document_year(self):
+        page = {'category': 'annual', 'title': 'Example 2025 Annual Report',
+                'url': 'https://example.org/ar25', 'text': 'Revenue was USD 500 million.'}
+        claim = {'section': 'financial', 'text': 'Выручка составила USD 500 million.',
+                 'quote': page['text'], 'url': page['url']}
+        verified = official.verified_claims({'claims': [claim, claim]}, [page])
+        self.assertEqual(len(verified), 1)
+        self.assertEqual(verified[0]['document_year'], '2025')
+        md = '\n'.join(official.render({'official': {'pages': [page], 'claims': verified}}, {}))
+        self.assertIn('годовой отчёт за 2025', md)
 
     def test_subdomain_ips_enter_network_enrichment(self):
         row = {'server': 'directapi', 'tool': 'resolve_hosts', 'ok': True,

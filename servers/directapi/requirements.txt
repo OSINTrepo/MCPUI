@@ -1,3 +1,5 @@
 mcp==1.15.0
 httpx
 dnspython
+yfinance>=0.2.36
+beautifulsoup4>=4.12

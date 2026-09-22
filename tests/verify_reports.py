@@ -64,7 +64,8 @@ async def one(task, need, forbid):
     body = await fetch(f"{REPORTS}/{slug}")
     problems = [f"нет '{s}'" for s in need if s.lower() not in body.lower()]
     problems += [f"ЗАПРЕЩ '{s}'" for s in forbid if s.lower() in body.lower()]
-    ok_line = re.search(r"Успешно опрошено:\s*(\d+)\s*из\s*(\d+)", body)
+    # Шапка теперь считает СЕРВЕРЫ, а не вызовы («Ответили источников: N из M»).
+    ok_line = re.search(r"Ответили источников:\s*(\d+)\s*из\s*(\d+)", body)
     stat = f"{ok_line.group(0)}" if ok_line else "?"
     return task, f"{slug} [{stat}]", problems
 

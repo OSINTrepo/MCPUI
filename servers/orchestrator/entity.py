@@ -47,7 +47,10 @@ _NOT_OFFICIAL = (
 def _norm(name: str) -> str:
     """Нормализация имени для сравнения (как в directapi._norm_company):
     без пунктуации и хвостовой юр. формы. «META PLATFORMS, INC.» → «meta platforms»."""
-    toks = [t for t in re.split(r"[^\w]+", (name or "").lower()) if t]
+    name = re.sub(r'^(?:(?:публичное|открытое|закрытое)\s+)?акционерное\s+общество\s+|^общество\s+с\s+ограниченной\s+ответственностью\s+', '', (name or '').lower())
+    toks = [t for t in re.split(r"[^\w]+", name) if t]
+    while toks and toks[0] in {"пао", "оао", "зао", "ао", "ооо", "pao", "oao", "zao", "ooo"}:
+        toks.pop(0)
     while toks and toks[-1] in recipes._ORG_SUFFIX:
         toks.pop()
     return " ".join(toks)
@@ -66,26 +69,48 @@ def _load(text: str):
 
 
 # ------------------------- разведочная волна -------------------------------
-def probe_specs(name: str) -> list[tuple[str, str, dict]]:
-    """Вызовы разведочной волны — (server, tool, args). Дёшево и keyless:
-    три запроса, каждый даёт независимый угол на то, «кто это вообще такие»."""
-    return [
-        ("directapi", "sec_edgar", {"query": name}),
-        ("directapi", "wikipedia_summary", {"query": name}),
-        ("directapi", "gleif_entity", {"query": name}),
-    ]
+def probe_specs(name: str, task: str = "") -> list[tuple[str, str, dict]]:
+    """Национальный реестр для РФ; международные пробы для остальных компаний."""
+    specs = [("directapi", "wikipedia_summary", {"query": name}),
+             ("directapi", "gleif_entity", {"query": name})]
+    if not (recipes.RE_ORG.search(name) or recipes.inn_values(task)):
+        ciks = list(dict.fromkeys(recipes.RE_CIK.findall(task)))
+        query = ciks[0].zfill(10) if len(ciks) == 1 else name
+        specs.insert(0, ("directapi", "sec_edgar", {"query": query}))
+    if recipes.looks_russian(name, task):
+        inns = list(dict.fromkeys(v for v in recipes.inn_values(task) if len(v) == 10))
+        if len(inns) == 1:
+            specs.insert(0, ("checko", "get_company", {"inn": inns[0]}))
+        else:
+            specs.insert(0, ("checko", "search", {"by": "name", "obj": "org", "query": name}))
+    return specs
 
 
 def parse_probes(results: list[dict]) -> dict:
     """Разобрать ответы разведочной волны в {sec, wikipedia, gleif, gleif_hint}."""
-    out: dict = {"sec": None, "wikipedia": None, "gleif": None, "gleif_hint": None}
+    out: dict = {"sec": None, "wikipedia": None, "gleif": None, "gleif_hint": None, "checko": None}
     for r in results:
-        if not r.get("ok") or r.get("server") != "directapi":
+        if not r.get("ok") or r.get("server") not in ("directapi", "checko"):
             continue
         j = _load(r.get("text", "") or "")
         if not isinstance(j, dict):
             continue
         tool = r.get("tool", "")
+        if r.get("server") == "checko":
+            data = j.get("data")
+            args = r.get("args") or {}
+            if isinstance(data, dict) and isinstance(data.get("Записи"), list):
+                matches = [row for row in data["Записи"] if isinstance(row, dict)
+                           and _norm(row.get("НаимСокр") or row.get("НаимПолн")) == _norm(args.get("query"))]
+                data = matches[0] if len(matches) == 1 else None
+            if isinstance(data, dict) and re.fullmatch(r"\d{10}", str(data.get("ИНН", ""))):
+                if args.get("inn") and str(data["ИНН"]) != str(args["inn"]):
+                    continue
+                name = data.get("НаимСокр") or data.get("НаимПолн")
+                if name:
+                    out["checko"] = dict(name=name, inn=str(data["ИНН"]), ogrn=data.get("ОГРН"),
+                        status=(data.get("Статус") or {}).get("Наим") if isinstance(data.get("Статус"), dict) else data.get("Статус"))
+            continue
         if tool == "sec_edgar" and not j.get("error") and j.get("name"):
             out["sec"] = j
         elif tool == "wikipedia_summary" and not j.get("error") and j.get("title"):
@@ -138,6 +163,10 @@ def build_candidates(query: str, probes: dict) -> list[dict]:
              tickers=sec.get("tickers") or [],
              jurisdiction=(f"US-{sec['state_of_incorporation']}"
                            if sec.get("state_of_incorporation") else "US"))
+    ck = probes.get("checko") or {}
+    if ck.get("name") and ck.get("inn"):
+        _add(cands, ck["name"], "checko", inn=ck["inn"], ogrn=ck.get("ogrn"),
+             jurisdiction="RU", entity_status=ck.get("status"))
     g = probes.get("gleif") or {}
     if g.get("legal_name"):
         _add(cands, g["legal_name"], "gleif", lei=g.get("lei"),
@@ -168,7 +197,7 @@ def _wiki_supports(cand: dict, wiki: dict) -> bool:
     hay = " ".join(str(wiki.get(k) or "") for k in
                    ("title", "description", "extract")).lower()
     toks = _tokens(cand["name"])
-    return bool(toks) and all(t in hay for t in toks)
+    return bool(toks) and all(re.search(r"(?<!\w)" + re.escape(t) + r"(?!\w)", hay) for t in toks)
 
 
 def brand_match(name: str, domain: str) -> bool:
@@ -200,6 +229,10 @@ def _score(cand: dict, probes: dict, domains: list[str]) -> None:
         confirms += 1
         why.append(f"SEC EDGAR: CIK {cand.get('cik') or sec.get('cik') or '—'}"
                    + (f", тикер {', '.join(cand['tickers'])}" if cand.get("tickers") else ""))
+    if "checko" in cand["sources"]:
+        score += 3
+        confirms += 1
+        why.append(f"ЕГРЮЛ / Checko: ИНН {cand['inn']}, ОГРН {cand.get('ogrn') or '—'}")
     if _wiki_supports(cand, probes.get("wikipedia") or {}):
         if "wikipedia" not in cand["sources"]:
             cand["sources"].append("wikipedia")
@@ -250,7 +283,7 @@ def resolve(query: str, probes: dict, domains: list[str] | None = None) -> dict:
             # Протухшая запись реестра не может быть ответом ни при каком балле.
             c["rejected"] = (f"регистрация LEI в статусе {c['reg_status']} — "
                              f"запись не актуальна")
-        elif not ({"sec_edgar", "gleif"} & set(origins)):
+        elif not ({"sec_edgar", "gleif", "checko"} & set(origins)):
             # Имя пришло из нечёткой подсказки, заголовка статьи или самого
             # запроса — то есть ни один реестр такого юрлица НЕ утверждал.
             # Приписать цели такое имя хуже, чем честно сказать «не опознали».
@@ -270,8 +303,10 @@ def resolve(query: str, probes: dict, domains: list[str] | None = None) -> dict:
     return {
         "query": query,
         "legal_name": winner["name"] if winner else None,
+        "inn": (winner or {}).get("inn"),
+        "ogrn": (winner or {}).get("ogrn"),
         "lei": (winner or {}).get("lei"),
-        "cik": (winner or {}).get("cik") or (sec.get("cik") if winner else None),
+        "cik": (winner or {}).get("cik"),
         "tickers": (winner or {}).get("tickers") or [],
         "jurisdiction": (winner or {}).get("jurisdiction"),
         "confirms": confirms,
@@ -279,6 +314,30 @@ def resolve(query: str, probes: dict, domains: list[str] | None = None) -> dict:
         "candidates": sorted(cands, key=lambda c: (-c["score"], c["name"])),
         "domains": domains,
     }
+
+
+def refresh_identity(current: dict | None, query: str, results: list[dict],
+                     domains: list[str]) -> dict | None:
+    """Поздние реестры дополняют ту же сущность; чужие идентификаторы не склеиваем."""
+    recovered = resolve(query, parse_probes(results), domains)
+    if not recovered.get("legal_name"):
+        return current
+    if (current or {}).get("legal_name"):
+        if _norm(current["legal_name"]) != _norm(recovered["legal_name"]):
+            return current
+        old_country, new_country = jurisdiction_code(current), jurisdiction_code(recovered)
+        if old_country and new_country and old_country != new_country:
+            return current
+        for key in ("lei", "cik", "inn", "ogrn"):
+            if current.get(key) and recovered.get(key) and current[key] != recovered[key]:
+                return current
+        # При временном отказе одного реестра не теряем уже подтверждённые поля.
+        for key in ("lei", "cik", "inn", "ogrn", "tickers", "jurisdiction"):
+            if not recovered.get(key) and current.get(key):
+                recovered[key] = current[key]
+    recovered["domains"] = domains
+    recovered["domain_candidates"] = (current or {}).get("domain_candidates", [])
+    return recovered
 
 
 def registry_name(res: dict) -> str:
