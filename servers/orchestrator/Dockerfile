@@ -7,5 +7,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends         libpang
 COPY servers/orchestrator/requirements.txt /app/requirements.txt
 
 RUN pip install --no-cache-dir --break-system-packages --timeout 90 --retries 3 -r /app/requirements.txt
+# Проверка импортов обязательна: /healthz шлюза не проверяет дочерний MCP-процесс.
+RUN pip check && python -c "from mcp.server.fastmcp import Context, FastMCP"
 
 COPY servers/orchestrator/ /app/
+COPY tests/mcp_startup_smoke.py /app/mcp_startup_smoke.py

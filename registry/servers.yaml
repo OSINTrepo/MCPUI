@@ -154,7 +154,7 @@ servers:
     transport: stdio
     install: docker
     build: servers/zoomeye
-    stdio_command: "uvx --offline --with httpx --with 'mcp==1.15.0' mcp-server-zoomeye"
+    stdio_command: "uvx --offline --with httpx --with 'mcp==1.15.0' --with 'pydantic==2.13.5' mcp-server-zoomeye"
     auth:
       type: api_key
       user_var: ZOOMEYE_API_KEY
@@ -349,7 +349,7 @@ servers:
     # Пинуем mcp: checko-mcp 0.1.0 объявляет mcp>=1.0, а uvx тянет latest (1.28+),
     # где убрали re-export mcp.server.Server.list_tools → сервер падал на старте
     # («No valid session ID» на все вызовы). 1.15.0 — последняя рабочая для него.
-    stdio_command: "uvx --offline --with 'mcp==1.15.0' checko-mcp"
+    stdio_command: "uvx --offline --with 'mcp==1.15.0' --with 'pydantic==2.13.5' checko-mcp"
     auth:
       type: api_key
       user_var: CHECKO_API_KEY
@@ -435,7 +435,7 @@ servers:
     # MCP-режим отдаёт 18 инструментов без LLM-ключа (ключ Anthropic нужен только
     # для отдельного agent-режима). Часть инструментов требует опц. ключей
     # (HIBP/SHODAN/VT) — работают и без них на доступном подмножестве.
-    stdio_command: "uvx --offline --from openosint --with 'mcp==1.15.0' --with sublist3r openosint-mcp"
+    stdio_command: "uvx --offline --from openosint --with 'mcp==1.15.0' --with 'pydantic==2.13.5' --with sublist3r openosint-mcp"
     auth:
       type: none
       user_var: null

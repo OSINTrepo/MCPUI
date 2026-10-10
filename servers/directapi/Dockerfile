@@ -7,6 +7,7 @@ FROM ${BASE_IMAGE}
 # Изменение парсера не должно повторно скачивать все зависимости.
 COPY servers/directapi/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir --break-system-packages -r /app/requirements.txt
+RUN pip check && python -c "from mcp.server.fastmcp import Context, FastMCP"
 COPY servers/common/ /app/common/
 COPY servers/directapi/ /app/
 

@@ -424,12 +424,40 @@ docker compose exec -T mongodb mongodump --archive --gzip \
 | В UI другая модель | Пресет чата и обе внутренние модели в `.env` |
 | Отчёт не открывается | Порт 8899, SSH-туннель, `REPORTS_URL_BASE` |
 | Мало корпоративных сведений | Источники страны, ключи и ограничения доступа к реестрам |
-| Контейнер healthy, источник молчит | Проверить реальный вызов API: healthcheck проверяет процесс |
+| `ImportError: ... eval_type_backport` | Обновить код и пересобрать сервисы: MCP 1.15 требует закреплённый Pydantic 2.13.5 |
+| Контейнер healthy, источник молчит | Проверить MCP initialize/tools/list: `/healthz` проверяет шлюз, а не дочерний Python-процесс |
+| Модель пишет «вызываю инструмент» или показывает DSML | Это текст, а не выполненный вызов. Сначала проверить запуск оркестратора, затем открыть новый чат |
 
 Начните с `docker compose ps` и `docker compose logs --tail=100 <сервис>`.
 Не публикуйте необработанные журналы или конфигурацию с ключами.
 WHOIS-история повторно используется из постоянного кэша; настройка описана
 в [DRS_CACHE.md](docs/DRS_CACHE.md).
+
+При ошибке `eval_type_backport` на другом компьютере выполняйте исправление
+именно на этом компьютере, из каталога его копии репозитория. Обновление
+локальной копии не изменяет другую установку. После сохранения своих изменений:
+
+```bash
+source .venv/bin/activate
+git pull --ff-only
+python generator/generate.py
+export COMPOSE_PROFILES=
+export COMPOSE_FILE=docker-compose.yml:docker-compose.mcp.yml:docker-compose.api.yml
+docker compose build --no-cache orchestrator directapi checko zoomeye openosint
+docker compose up -d --no-deps --force-recreate orchestrator directapi checko zoomeye openosint
+docker compose restart librechat
+docker compose exec -T orchestrator python /app/mcp_startup_smoke.py --url http://127.0.0.1:8000/mcp
+```
+
+Последняя команда выполняет `initialize`, `tools/list` и `tools/call` для
+`catalog`; она не запускает расследование и не расходует квоты поставщиков.
+Успешный результат начинается с `MCP startup OK`. После него откройте новый
+чат с пресетом «DeepSeek · OSINT Авто» и отправьте запрос заново. Настоящее
+расследование видно в журналах как `tools/call` с именем `investigate`.
+Если вместо этого по-прежнему отображается DSML, отдельно проверяйте путь
+структурированных вызовов модели; успешный MCP-тест его не подтверждает.
+Для установки с локальной моделью используйте свои действующие Compose-файлы
+и профиль вместо двух строк `export` для API-режима.
 
 Реестр `registry/servers.yaml` и шаблоны генератора являются источниками
 конфигурации. Не редактируйте вручную `config/librechat.yaml`,

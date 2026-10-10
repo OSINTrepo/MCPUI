@@ -138,7 +138,7 @@ services:
     # Идемпотентный патч применяется и к ранее собранным образам.
     entrypoint: ["/bin/sh", "-c", 'node /opt/patch_supergateway.js && exec "$@"', "--"]
     command: >
-      supergateway --stdio "uvx --offline --with httpx --with 'mcp==1.15.0' mcp-server-zoomeye"
+      supergateway --stdio "uvx --offline --with httpx --with 'mcp==1.15.0' --with 'pydantic==2.13.5' mcp-server-zoomeye"
       --outputTransport streamableHttp --port 8000
       --streamableHttpPath /mcp --stateful
       --healthEndpoint /healthz
@@ -274,7 +274,7 @@ services:
     # Идемпотентный патч применяется и к ранее собранным образам.
     entrypoint: ["/bin/sh", "-c", 'node /opt/patch_supergateway.js && exec "$@"', "--"]
     command: >
-      supergateway --stdio "uvx --offline --with 'mcp==1.15.0' checko-mcp"
+      supergateway --stdio "uvx --offline --with 'mcp==1.15.0' --with 'pydantic==2.13.5' checko-mcp"
       --outputTransport streamableHttp --port 8000
       --streamableHttpPath /mcp --stateful
       --healthEndpoint /healthz
@@ -398,7 +398,7 @@ services:
     # Идемпотентный патч применяется и к ранее собранным образам.
     entrypoint: ["/bin/sh", "-c", 'node /opt/patch_supergateway.js && exec "$@"', "--"]
     command: >
-      supergateway --stdio "uvx --offline --from openosint --with 'mcp==1.15.0' --with sublist3r openosint-mcp"
+      supergateway --stdio "uvx --offline --from openosint --with 'mcp==1.15.0' --with 'pydantic==2.13.5' --with sublist3r openosint-mcp"
       --outputTransport streamableHttp --port 8000
       --streamableHttpPath /mcp --stateful
       --healthEndpoint /healthz
