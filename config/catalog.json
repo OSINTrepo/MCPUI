@@ -148,6 +148,23 @@
     "repo": "https://github.com/brightdata/brightdata-mcp"
   },
   {
+    "id": "newdb",
+    "display_name": "NewDB",
+    "category": "company",
+    "description": "NewDB: ЕГРЮЛ/ЕГРИП и корпоративные проверки РФ. Для точного поиска нужен российский ИНН; ФИО даёт кандидатов.",
+    "cost_tier": "paid",
+    "transport": "http",
+    "endpoint": "https://api.newdb.net/mcp",
+    "inputs": [
+      "company",
+      "inn"
+    ],
+    "requires_key": true,
+    "key_var": "NEWDB_MCP_TOKEN",
+    "status": "needs_key",
+    "repo": "https://newdb.net/mcp-server-newdb"
+  },
+  {
     "id": "checko",
     "display_name": "Checko MCP",
     "category": "company",

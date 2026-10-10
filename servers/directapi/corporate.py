@@ -11,8 +11,8 @@ import httpx
 from bs4 import BeautifulSoup, NavigableString
 
 CATEGORIES = {
-    'legal': ('informacion-legal', 'aviso-legal', 'legal-notice', 'imprint', 'requisites', 'rekvizity', 'contacts'),
-    'governance': ('organos-gobierno', 'board-of-directors', 'consejo-de-administracion', 'board-members', 'management-board', 'leadership', 'corporate-governance'),
+    'legal': ('informacion-legal', 'aviso-legal', 'legal-notice', 'imprint', 'requisites', 'rekvizity', 'contacts', 'yhteystiedot', 'yhteys', 'tietosuoja'),
+    'governance': ('organos-gobierno', 'board-of-directors', 'consejo-de-administracion', 'board-members', 'management-board', 'leadership', 'corporate-governance', 'hallitus', 'our-team', '/team', 'tiimi', 'komanda', 'redaktsiya'),
     'executive': ('executive-team', 'executive-committee', 'equipo-directivo', 'equipo-ejecutivo', 'comite-de-direccion', 'management-board', 'executive-officers', 'senior-leadership', 'pravlenie'),
     'business': ('nuestros-negocios', 'our-business', 'business-areas', 'our-group', 'nuestro-grupo', 'what-we-do', 'main-data', 'principales-datos', 'about-company', 'about-us'),
     'locations': ('donde-estamos', 'where-we-are', 'locations', 'offices', 'global-presence', 'worldwide'),
@@ -22,7 +22,7 @@ CATEGORIES = {
     'projects': ('innovation-projects', 'proyectos-innovacion', 'research-projects'),
 }
 GROUP = re.compile(r'^(?:Consejo de Administraci[oó]n|Comisi[oó]n .+|Comit[eé] de Direcci[oó]n|'
-                   r'(?:.*\s)?Board of Directors|Board Members|Executive Team|Equipo Ejecutivo|Executive Committee|Management Board|Совет директоров|Правление|.+ Committee)$', re.I)
+                   r'(?:.*\s)?Board of Directors|Board Members|Executive Team|Equipo Ejecutivo|Executive Committee|Management Board|Совет директоров|Правление|Hallitus|Tiimi|(?:Our )?Team|Команда|Редакция|Руководство|.+ Committee)$', re.I)
 ROLE = re.compile(r'^(?:president[ea]?|chair(?:man|woman)?|vicepresident.+|consejer[oa] delegado|'
                   r'vocales|secretari[oa].*|vicesecretari[oa].*|responsables .+|CEO|CFO)$', re.I)
 
@@ -60,6 +60,16 @@ def parse_page(html: str, url: str, category: str) -> dict:
                     if u and (u, '') not in links:
                         links.append((u, ''))
     title = soup.title.get_text(' ', strip=True) if soup.title else url
+    # Реквизиты небольших организаций часто опубликованы только в footer.
+    # Шаблонный подвал исключаем, но явно помеченные юридические/деловые
+    # сведения сохраняем для извлечения фактов с исходным URL.
+    legal_footers = []
+    legal_marker = re.compile(r'Y[- ]?tunnus|Business\s+ID|\b(?:VAT|CIF|NIF|ИНН|ОГРН)\b|'
+                              r'\b\d{7}-\d\b|[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}', re.I)
+    for footer in soup.find_all('footer'):
+        footer_text = footer.get_text('\n', strip=True)
+        if legal_marker.search(footer_text):
+            legal_footers.append(footer_text[:4000])
     for node in soup.select('script, style, svg, nav, footer, form, noscript'):
         node.decompose()
     # Заголовок статьи внутри main — данные; удаляем только общую шапку сайта.
@@ -90,6 +100,8 @@ def parse_page(html: str, url: str, category: str) -> dict:
             group, role = label, ''
         elif ROLE.match(label):
             role = label
+        elif h.name in ('h1', 'h2'):
+            group, role = '', ''
         elif group and h.name == 'h3' and 1 < len(label.split()) < 8:
             if any(x in label.lower() for x in ('reglamento', 'conoce', 'transparencia', 'negocios')):
                 group = ''
@@ -128,6 +140,8 @@ def parse_page(html: str, url: str, category: str) -> dict:
                     people.append(dict(name=name, group=page_group, role=position,
                                        appointed=appointed.group(1) if appointed else None, source_url=url))
     text = "\n".join(lines)
+    if legal_footers:
+        text += '\n\n' + '\n'.join(legal_footers)
     businesses, projects, metrics = [], [], []
     start = next((i for i, line in enumerate(lines) if line.lower() in ("negocios", "our businesses", "our business")), None)
     if start is not None:

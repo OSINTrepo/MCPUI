@@ -48,6 +48,8 @@ def _norm(name: str) -> str:
     """Нормализация имени для сравнения (как в directapi._norm_company):
     без пунктуации и хвостовой юр. формы. «META PLATFORMS, INC.» → «meta platforms»."""
     name = re.sub(r'^(?:(?:публичное|открытое|закрытое)\s+)?акционерное\s+общество\s+|^общество\s+с\s+ограниченной\s+ответственностью\s+', '', (name or '').lower())
+    name = re.sub(r"mas[^\w]?uliyati\s+cheklangan\s+jamiyati?", "", name)
+    name = re.sub(r"\bmchj\b", "", name)
     toks = [t for t in re.split(r"[^\w]+", name) if t]
     while toks and toks[0] in {"пао", "оао", "зао", "ао", "ооо", "pao", "oao", "zao", "ooo"}:
         toks.pop(0)
@@ -73,7 +75,20 @@ def probe_specs(name: str, task: str = "") -> list[tuple[str, str, dict]]:
     """Национальный реестр для РФ; международные пробы для остальных компаний."""
     specs = [("directapi", "wikipedia_summary", {"query": name}),
              ("directapi", "gleif_entity", {"query": name})]
-    if not (recipes.RE_ORG.search(name) or recipes.inn_values(task)):
+    country = recipes.country_hint(task)
+    if country == "UZ":
+        tax_ids = re.findall(r"\b(?:ИНН|STIR|TIN)[\s:#№=-]*(\d{9})\b", task, re.I)
+        args = {"query": name}
+        if len(set(tax_ids)) == 1:
+            args["tax_id"] = tax_ids[0]
+        specs.insert(0, ("directapi", "uz_company_records", args))
+    if country == "FI":
+        args = {"query": name}
+        business_ids = recipes.fi_business_id_values(task)
+        if len(business_ids) == 1:
+            args["business_id"] = business_ids[0]
+        specs.insert(0, ("directapi", "fi_company_records", args))
+    if country in ("", "US") and not (recipes.RE_ORG.search(name) or recipes.inn_values(task)):
         ciks = list(dict.fromkeys(recipes.RE_CIK.findall(task)))
         query = ciks[0].zfill(10) if len(ciks) == 1 else name
         specs.insert(0, ("directapi", "sec_edgar", {"query": query}))
@@ -83,12 +98,15 @@ def probe_specs(name: str, task: str = "") -> list[tuple[str, str, dict]]:
             specs.insert(0, ("checko", "get_company", {"inn": inns[0]}))
         else:
             specs.insert(0, ("checko", "search", {"by": "name", "obj": "org", "query": name}))
+    for registration_number in recipes.company_registration_values(task):
+        specs.append(("directapi", "opencorporates_search", {"query": registration_number}))
     return specs
 
 
 def parse_probes(results: list[dict]) -> dict:
     """Разобрать ответы разведочной волны в {sec, wikipedia, gleif, gleif_hint}."""
-    out: dict = {"sec": None, "wikipedia": None, "gleif": None, "gleif_hint": None, "checko": None}
+    out: dict = {"sec": None, "wikipedia": None, "gleif": None, "gleif_hint": None,
+                 "checko": None, "fi_registry": None, "opencorporates_matches": []}
     for r in results:
         if not r.get("ok") or r.get("server") not in ("directapi", "checko"):
             continue
@@ -111,7 +129,22 @@ def parse_probes(results: list[dict]) -> dict:
                     out["checko"] = dict(name=name, inn=str(data["ИНН"]), ogrn=data.get("ОГРН"),
                         status=(data.get("Статус") or {}).get("Наим") if isinstance(data.get("Статус"), dict) else data.get("Статус"))
             continue
-        if tool == "sec_edgar" and not j.get("error") and j.get("name"):
+        if tool == "uz_company_records" and j.get("matched") and re.fullmatch(r"\d{9}", j.get("tax_id") or ""):
+            args = r.get("args") or {}
+            if ((args.get("tax_id") and args["tax_id"] == j["tax_id"]) or
+                    (not args.get("tax_id") and _norm(args.get("query")) == _norm(j.get("name")))):
+                out["uz_directory"] = j
+        elif (tool == "fi_company_records" and not j.get("error") and j.get("matched")
+              and j.get("official_registry_verified") and j.get("name")
+              and recipes.RE_FI_BUSINESS_ID.fullmatch(j.get("business_id") or "")):
+            args = r.get("args") or {}
+            # Preserve legal forms here: rf/ry associations cannot become Oy namesakes.
+            key = lambda s: " ".join(re.findall(r"\w+", (s or "").casefold()))
+            current_names = j.get("current_names") or [j["name"]]
+            if ((args.get("business_id") and args["business_id"] == j["business_id"]) or
+                    (not args.get("business_id") and key(args.get("query")) in {key(n) for n in current_names})):
+                out["fi_registry"] = j
+        elif tool == "sec_edgar" and not j.get("error") and j.get("name"):
             out["sec"] = j
         elif tool == "wikipedia_summary" and not j.get("error") and j.get("title"):
             out["wikipedia"] = j
@@ -120,6 +153,9 @@ def parse_probes(results: list[dict]) -> dict:
                 out["gleif"] = j
             elif j.get("did_you_mean"):
                 out["gleif_hint"] = j
+        elif tool == "opencorporates_search" and not j.get("error"):
+            out["opencorporates_matches"].extend(
+                m for m in (j.get("matches") or []) if isinstance(m, dict) and m.get("name"))
     return out
 
 
@@ -136,6 +172,13 @@ def _add(cands: dict, name: str, source: str, **fields) -> dict:
     if not key:
         return {}
     c = cands.get(key)
+    if c and ((c.get("jurisdiction") and fields.get("jurisdiction")
+               and c["jurisdiction"].split("-")[0] != fields["jurisdiction"].split("-")[0])
+              or (c.get("inn") and fields.get("inn") and c["inn"] != fields["inn"])
+              or (c.get("business_id") and fields.get("business_id") and c["business_id"] != fields["business_id"])):
+        # Одинаковое имя в разных странах/с разными ИНН — разные кандидаты.
+        key += ":" + str(fields.get("jurisdiction")) + ":" + str(fields.get("inn") or fields.get("business_id"))
+        c = cands.get(key)
     if c is None:
         c = cands[key] = {"name": name, "norm": key, "origins": [], "sources": [],
                           "why": [], "score": 0, "jurisdiction": None, "lei": None,
@@ -167,12 +210,26 @@ def build_candidates(query: str, probes: dict) -> list[dict]:
     if ck.get("name") and ck.get("inn"):
         _add(cands, ck["name"], "checko", inn=ck["inn"], ogrn=ck.get("ogrn"),
              jurisdiction="RU", entity_status=ck.get("status"))
+    uz = probes.get("uz_directory") or {}
+    if uz.get("name") and uz.get("tax_id"):
+        _add(cands, uz["name"], "uz_directory", inn=uz["tax_id"], jurisdiction="UZ",
+             registration_number=uz.get("registration_number"), directory_verified=True)
+    fi = probes.get("fi_registry") or {}
+    if fi.get("name") and fi.get("business_id"):
+        _add(cands, fi["name"], "fi_registry", business_id=fi["business_id"], jurisdiction="FI",
+             registration_number=fi.get("registration_number") or fi["business_id"],
+             official_registry_verified=True, source_url=fi.get("source_url"))
     g = probes.get("gleif") or {}
     if g.get("legal_name"):
         _add(cands, g["legal_name"], "gleif", lei=g.get("lei"),
              jurisdiction=g.get("jurisdiction"),
              reg_status=g.get("registration_status"),
              entity_status=g.get("entity_status"))
+    for match in probes.get("opencorporates_matches") or []:
+        _add(cands, match["name"], "opencorporates",
+             registration_number=match.get("company_number"),
+             jurisdiction=match.get("jurisdiction"),
+             reg_status=match.get("status"), source_url=match.get("url"))
     # other_matches/did_you_mean — ТОЛЬКО подсказки: похожее имя в реестре обычно
     # принадлежит другой компании, подтверждением это не считается.
     for nm in (g.get("other_matches") or []):
@@ -233,6 +290,14 @@ def _score(cand: dict, probes: dict, domains: list[str]) -> None:
         score += 3
         confirms += 1
         why.append(f"ЕГРЮЛ / Checko: ИНН {cand['inn']}, ОГРН {cand.get('ogrn') or '—'}")
+    if "uz_directory" in cand["sources"]:
+        score += 3
+        confirms += 1
+        why.append(f"Узбекские справочники: ИНН/STIR {cand['inn']}; не государственная выписка")
+    if "fi_registry" in cand["sources"]:
+        score += 3
+        confirms += 1
+        why.append(f"PRH/YTJ: Торговый реестр Финляндии, Y-tunnus {cand['business_id']}")
     if _wiki_supports(cand, probes.get("wikipedia") or {}):
         if "wikipedia" not in cand["sources"]:
             cand["sources"].append("wikipedia")
@@ -243,8 +308,7 @@ def _score(cand: dict, probes: dict, domains: list[str]) -> None:
         if "domain" not in cand["sources"]:
             cand["sources"].append("domain")
         score += 2
-        confirms += 1
-        why.append(f"официальный домен: {', '.join(domains[:2])}")
+        why.append(f"совпадение имени с доменом (не доказательство владения): {', '.join(domains[:2])}")
     if "gleif" in cand["sources"]:
         rs = (cand.get("reg_status") or "").upper()
         if rs in _BAD_REG_STATUS:
@@ -256,6 +320,11 @@ def _score(cand: dict, probes: dict, domains: list[str]) -> None:
             confirms += 1
             why.append(f"GLEIF: LEI {cand.get('lei') or '—'}"
                        + (f", {cand['jurisdiction']}" if cand.get("jurisdiction") else ""))
+    if "opencorporates" in cand["sources"]:
+        score += 1
+        why.append(f"OpenCorporates: номер {cand.get('registration_number') or '—'}, "
+                   f"статус {cand.get('reg_status') or 'не указан'}; агрегатор, "
+                   "первичная запись требует проверки")
     if "gleif_hint" in cand["sources"] and "gleif" not in cand["sources"]:
         why.append("GLEIF: похожее имя в реестре (не подтверждено)")
     # Согласие юрисдикций SEC и GLEIF — слабый, но независимый плюс.
@@ -266,7 +335,7 @@ def _score(cand: dict, probes: dict, domains: list[str]) -> None:
     cand["score"], cand["why"], cand["confirms"] = score, why, confirms
 
 
-def resolve(query: str, probes: dict, domains: list[str] | None = None) -> dict:
+def resolve(query: str, probes: dict, domains: list[str] | None = None, country: str = "") -> dict:
     """Выбрать юрлицо. Чистая функция: вход — разобранные пробы, выход — решение.
 
     legal_name is None → сущность НЕ опознана; вызывающий код обязан не утверждать
@@ -283,7 +352,11 @@ def resolve(query: str, probes: dict, domains: list[str] | None = None) -> dict:
             # Протухшая запись реестра не может быть ответом ни при каком балле.
             c["rejected"] = (f"регистрация LEI в статусе {c['reg_status']} — "
                              f"запись не актуальна")
-        elif not ({"sec_edgar", "gleif", "checko"} & set(origins)):
+        elif country and c.get("jurisdiction") and c["jurisdiction"].split("-")[0].upper() != country.upper():
+            c["rejected"] = "юрисдикция противоречит стране в запросе"
+        elif "opencorporates" in origins and not ({"sec_edgar", "gleif", "checko", "uz_directory", "fi_registry"} & set(origins)):
+            c["rejected"] = "OpenCorporates — агрегатор; первичный реестр отдельно не подтверждён"
+        elif not ({"sec_edgar", "gleif", "checko", "uz_directory", "fi_registry"} & set(origins)):
             # Имя пришло из нечёткой подсказки, заголовка статьи или самого
             # запроса — то есть ни один реестр такого юрлица НЕ утверждал.
             # Приписать цели такое имя хуже, чем честно сказать «не опознали».
@@ -296,9 +369,11 @@ def resolve(query: str, probes: dict, domains: list[str] | None = None) -> dict:
     if winner and winner["score"] < MIN_SCORE:
         winner = None
     for c in cands:
-        c["chosen"] = bool(winner and c["norm"] == winner["norm"])
+        c["chosen"] = c is winner
     confirms = winner["confirms"] if winner else 0
     confidence = "высокая" if confirms >= 2 else "средняя" if confirms == 1 else "низкая"
+    if winner and "uz_directory" in winner["origins"]:
+        confidence = "средняя"  # Несколько перепечаток и домен не заменяют первичный реестр.
     sec = probes.get("sec") or {}
     return {
         "query": query,
@@ -308,7 +383,12 @@ def resolve(query: str, probes: dict, domains: list[str] | None = None) -> dict:
         "lei": (winner or {}).get("lei"),
         "cik": (winner or {}).get("cik"),
         "tickers": (winner or {}).get("tickers") or [],
-        "jurisdiction": (winner or {}).get("jurisdiction"),
+        "jurisdiction": (winner or {}).get("jurisdiction") or country or None,
+        "jurisdiction_basis": "source" if winner else "user" if country else None,
+        "directory_verified": (winner or {}).get("directory_verified", False),
+        "registration_number": (winner or {}).get("registration_number"),
+        "business_id": (winner or {}).get("business_id"),
+        "official_registry_verified": (winner or {}).get("official_registry_verified", False),
         "confirms": confirms,
         "confidence": confidence if winner else "низкая",
         "candidates": sorted(cands, key=lambda c: (-c["score"], c["name"])),
@@ -319,7 +399,7 @@ def resolve(query: str, probes: dict, domains: list[str] | None = None) -> dict:
 def refresh_identity(current: dict | None, query: str, results: list[dict],
                      domains: list[str]) -> dict | None:
     """Поздние реестры дополняют ту же сущность; чужие идентификаторы не склеиваем."""
-    recovered = resolve(query, parse_probes(results), domains)
+    recovered = resolve(query, parse_probes(results), domains, ((current or {}).get("jurisdiction") or "").split("-")[0])
     if not recovered.get("legal_name"):
         return current
     if (current or {}).get("legal_name"):
@@ -328,11 +408,11 @@ def refresh_identity(current: dict | None, query: str, results: list[dict],
         old_country, new_country = jurisdiction_code(current), jurisdiction_code(recovered)
         if old_country and new_country and old_country != new_country:
             return current
-        for key in ("lei", "cik", "inn", "ogrn"):
+        for key in ("lei", "cik", "inn", "ogrn", "business_id"):
             if current.get(key) and recovered.get(key) and current[key] != recovered[key]:
                 return current
         # При временном отказе одного реестра не теряем уже подтверждённые поля.
-        for key in ("lei", "cik", "inn", "ogrn", "tickers", "jurisdiction"):
+        for key in ("lei", "cik", "inn", "ogrn", "business_id", "registration_number", "official_registry_verified", "tickers", "jurisdiction"):
             if not recovered.get(key) and current.get(key):
                 recovered[key] = current[key]
     recovered["domains"] = domains
@@ -362,6 +442,11 @@ def domain_candidates(name: str, probes: dict, limit: int = 10) -> list[str]:
     посторонний alfa.com, и всё инфраструктурное досье уходило не туда."""
     out: list[str] = []
     wiki = probes.get("wikipedia") or {}
+    for card in (probes.get("uz_directory") or {}).get("records", []):
+        for email in recipes.RE_EMAIL.findall(card.get("evidence_text") or ""):
+            d = email.split("@", 1)[1].lower()
+            if brand_match(name, d) and d not in out:
+                out.append(d)
     toks = _tokens(name)
     flat = re.sub(r"[^a-z0-9]", "", "".join(toks))
     for item in (wiki.get("external_domains") or []):

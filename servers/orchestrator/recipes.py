@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import base64
+import russia_links
 import re
 
 # --- Регэкспы типов целей (порядок важен: специфичное раньше общего) ---
@@ -16,11 +17,67 @@ RE_URL = re.compile(r"\bhttps?://[^\s]+", re.I)
 RE_HASH = re.compile(r"\b[a-fA-F0-9]{64}\b|\b[a-fA-F0-9]{40}\b|\b[a-fA-F0-9]{32}\b")
 RE_INN = re.compile(r"\b\d{10}\b|\b\d{12}\b")
 RE_CIK = re.compile(r"\bCIK[\s:#№=-]*(\d{1,10})\b", re.I)
+RE_COMPANY_REGISTRATION = re.compile(r"\b(?:OC|SC|SO|NI|LP)\d{6,}\b", re.I)
+RE_FI_BUSINESS_ID = re.compile(r"\b\d{7}-\d\b")
+RE_EXPLICIT_COMPANY_TARGET = re.compile(
+    r"(?im)(?:^|[.\n;])\s*(?:цель(?: расследования)?|целевая компания|"
+    r"основная компания|target|primary company)\s*[:=—-]\s*([^\n;|]+)"
+)
+
+
+def country_hint(text: str) -> str:
+    """Явно указанная страна важнее общего для СНГ обозначения «ООО».
+    При нескольких странах не выбираем одну по порядку перечисления.
+    """
+    text = russia_links.target_context(text)
+    # Названия доменов вроде bbg-russia.trade — это идентификаторы сайта,
+    # а не заявление о стране регистрации компании.
+    text = RE_URL.sub(" ", text or "")
+    text = RE_EMAIL.sub(" ", text)
+    text = RE_DOMAIN.sub(" ", text)
+    patterns = {
+        "UZ": r"\b(?:узбекистан\w*|узбекск\w*|uzbekistan|o.zbekiston|mchj)\b",
+        "RU": r"\b(?:росси[яию]\w*|российск\w*|russia|рф)\b",
+        "US": r"\b(?:сша|американск\w*|united states|usa)\b",
+        "GB": r"\b(?:великобритани\w*|united kingdom)\b",
+        "ES": r"\b(?:испанск\w*|испани[яию]|spain)\b",
+        "FI": r"\b(?:финлянд\w*|финск\w*|finland|finnish|suomi|y[- ]tunnus)\b",
+        "KZ": r"\b(?:казахстан\w*|казахск\w*|kazakhstan)\b",
+        "BY": r"\b(?:беларус\w*|белорус\w*|belarus)\b",
+        "KG": r"\b(?:кыргыз\w*|киргиз\w*|kyrgyzstan)\b",
+        "UA": r"\b(?:украин\w*|ukraine)\b",
+    }
+    found = [code for code, pattern in patterns.items() if re.search(pattern, text or "", re.I)]
+    return found[0] if len(found) == 1 else ""
 
 
 def inn_values(text: str) -> list[str]:
     """Десятизначный CIK SEC не является российским ИНН."""
     return RE_INN.findall(RE_CIK.sub(" ", text or ""))
+
+
+def company_registration_values(text: str) -> list[str]:
+    """UK company/LLP numbers supplied in a task (e.g. OC401309)."""
+    return list(dict.fromkeys(x.upper() for x in RE_COMPANY_REGISTRATION.findall(text or "")))
+
+
+def fi_business_id_values(text: str) -> list[str]:
+    """Finnish Business IDs are not Russian INNs or British registration numbers."""
+    return list(dict.fromkeys(RE_FI_BUSINESS_ID.findall(text or "")))
+
+
+def explicit_company_target(task: str) -> str | None:
+    """Явная метка «Цель: …» важнее упоминаний кандидатов в пояснении.
+
+    Иначе формулировка вроде «проверить Boston Brokerage Group и британское
+    LLP OC401309» могла выбрать описательный хвост «британское LLP» как компанию.
+    """
+    text = russia_links.target_context(task or "")
+    matches = list(RE_EXPLICIT_COMPANY_TARGET.finditer(text))
+    if not matches:
+        return None
+    value = matches[-1].group(1).strip().rstrip(" \t\r\n.,;:!?—–-")
+    return _clean_company(value)
 
 RE_DOMAIN = re.compile(r"\b(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}\b")
 RE_TICKER = re.compile(r"\$([A-Z]{1,5})\b")
@@ -41,7 +98,7 @@ RE_INT_ORG = re.compile(
     r"(?:\s+[A-ZА-Яa-zа-яё0-9\-\.&]{1,30}){0,5})"
     r"\s+\b(S\.?A\.?U?\.?|S\.?L\.?U?\.?|GmbH(?:\s*&\s*Co\.?\s*K\.?G\.?)?|A\.?G\.?|"
     r"Plc\.?|Ltd\.?|Limited|Inc\.?|Incorporated|Corp\.?|Corporation|"
-    r"N\.?V\.?|B\.?V\.?|AB|Oy|S\.?R\.?L\.?|Sp\.?A\.?|SE|SAS|SARL|SAU|"
+    r"N\.?V\.?|B\.?V\.?|AB|Oyj|Oy|ry|rf|S\.?R\.?L\.?|Sp\.?A\.?|SE|SAS|SARL|SAU|"
     r"S\.A\.\s*de\s*C\.V\.|LLC|L\.?L\.?C\.?|LLP|L\.?L\.?P\.?)\b",
     re.I
 )
@@ -53,7 +110,7 @@ _COMPANY_STOP = {"по", "с", "на", "об", "о", "из", "для", "к", "у
                  "инн", "огрн", "огрнип", "кпп", "названию", "имени", "номеру"}
 _COMPANY_TERM = {"сайт", "сайте", "site", "website", "домен", "domain", "url",
                  "адрес", "address", "телефон", "phone", "email", "почта", "cif", "nif",
-                 "инн", "огрн", "кпп", "тикер", "ticker", "cik"}
+                 "инн", "огрн", "кпп", "тикер", "ticker", "cik", "y-tunnus"}
 
 
 def _clean_company(name: str) -> str | None:
@@ -63,7 +120,7 @@ def _clean_company(name: str) -> str | None:
     не осталось (тогда это не имя компании)."""
     out: list[str] = []
     for tok in name.strip(" «»\"'").split():
-        low = tok.lower().strip(".,")
+        low = tok.lower().strip(".,:;")
         if re.fullmatch(r"\d{6,}", tok):          # длинное число = ИНН/ОГРН
             break
         if low in _COMPANY_TERM:                  # терминирующее слово
@@ -71,7 +128,8 @@ def _clean_company(name: str) -> str | None:
         if not out and low in _COMPANY_STOP:
             continue                               # ведущие предлоги/служебные
         out.append(tok)
-    cleaned = " ".join(out).strip(" «»\"'")
+    cleaned = " ".join(out).strip(" «»\"'").rstrip(".,;:!?")
+    cleaned = cleaned.replace("«", "").replace("»", "")
     return cleaned if len(cleaned) >= 2 and cleaned.lower() not in _ORG_SUFFIX else None
 
 # Идентификаторы, под которые НЕТ ни одного сервера в реестре. Ловим их явно,
@@ -96,6 +154,7 @@ _STOPWORDS = {
 
 def detect_targets(task: str) -> list[dict]:
     """Список целей [{'type','value'}] по тексту задачи (без дублей типов-значений)."""
+    task = russia_links.target_context(task.replace('(.)', '.').replace('[.]', '.'))
     found: list[dict] = []
     seen: set[tuple[str, str]] = set()
 
@@ -143,11 +202,21 @@ def detect_targets(task: str) -> list[dict]:
     for v in RE_TICKER_KW.findall(task):
         add("ticker", v.upper())
 
+    # Этикетка задачи — авторитетная цель; сначала добавляем её, чтобы
+    # primary_company в investigate не схватил упомянутый рядом реестровый тип
+    # или одноимённую компанию-кандидата.
+    explicit_target = explicit_company_target(task)
+    if explicit_target:
+        add("company", explicit_target)
+
     # Компания по названию (ООО/ПАО/… или «компания X»). Чистим захват, чтобы
     # «компанию по ИНN 7707083893» не превращалось в компанию «по ИНН …».
     for rx in (RE_ORG, RE_COMPANY_KW):
         for v in rx.findall(task):
             name = _clean_company(v)
+            if rx is RE_COMPANY_KW and name and re.match(
+                    r'^(?:за\s+)?(?:этими?\s+домен|этими?\s+сайт|владельц|за\s+домен|по\s+домен|по\s+сайт|связанн|behind\b|owning\b)', name, re.I):
+                continue
             if name:
                 add("company", name)
 
@@ -241,7 +310,7 @@ def guess_target_type(task: str) -> list[dict]:
 _ORG_SUFFIX = {
     "sa", "s", "a", "sl", "sau", "slu", "sас", "inc", "llc", "ltd", "limited",
     "corp", "corporation", "co", "company", "gmbh", "ag", "plc", "group", "grupo",
-    "holding", "holdings", "spa", "srl", "bv", "nv", "oy", "ab", "as", "pao",
+    "holding", "holdings", "spa", "srl", "bv", "nv", "oy", "oyj", "ry", "rf", "ab", "as", "pao",
     "oao", "ooo", "zao", "ip", "пао", "оао", "ооо", "зао", "ао", "ип",
 }
 _BRAND_TLDS = ("com", "net", "org", "io", "es", "eu", "co", "group", "tech")
@@ -385,7 +454,7 @@ def deep_domain_steps(v: str, vt_rel_cap: int) -> list[tuple[str, str, dict]]:
         ("dnstwist", "fuzz_domain", {"domain": v, "registered_only": True, "mxcheck": False, "banners": False, "threads": 30}),  # тайпсквоттинг
         ("openosint", "search_domain", {"domain": v}),             # OpenOSINT агрегация
         ("zoomeye", "zoomeye_search",                              # ZoomEye — хосты домена
-         {"qbase64": __import__("base64").b64encode(f'hostname:"{v}"'.encode()).decode()}),
+         {"qbase64": __import__("base64").b64encode(f'hostname="{v}"'.encode()).decode()}),
         ("googlesearch", "web_search", {"query": v, "engine": "news"}),    # деловые новости
         ("googlesearch", "web_search", {"query": v, "engine": "leaks"}),   # утечки/базы данных
         ("googlesearch", "web_search", {"query": v, "engine": "social"}),  # соцсети
@@ -415,10 +484,15 @@ def looks_russian(name: str, task: str = "", jurisdiction: str = "") -> bool:
     """Есть ли смысл спрашивать российский ЕГРЮЛ. Checko платный и по зарубежной
     компании гарантированно отдаёт пустой результат — раньше он всё равно уходил
     в каждый веер и просто раздувал знаменатель «ответили N из M»."""
+    jurisdiction = jurisdiction or country_hint(task)
     if jurisdiction:
         return jurisdiction.upper().startswith("RU")
     if RE_CYRILLIC.search(name or ""):
         return True
+    # In a Russia-links focus task, unrelated candidate INNs and a foreign
+    # legal-form mention must not reclassify the primary target as Russian.
+    if russia_links.requested(task):
+        return False
     return bool(inn_values(task)) or bool(RE_ORG.search(task or ""))
 
 
@@ -435,7 +509,7 @@ def deep_company_steps(name: str, identity: dict | None = None, *,
     однозначно, без сопоставления строк."""
     ident = identity or {}
     lei, tickers = ident.get("lei"), (ident.get("tickers") or [])
-    jur = ident.get("jurisdiction") or ""
+    jur = ident.get("jurisdiction") or country_hint(task)
     # Прим.: filingfirehose (SEC 8-K) НЕ включаем — его search_8k_filings отдаёт
     # свежие отчёты ПО РЫНКУ, а не по конкретной компании (был бы шум чужих эмитентов).
     steps: list[tuple[str, str, dict]] = [
@@ -483,6 +557,15 @@ def deep_company_steps(name: str, identity: dict | None = None, *,
         jur2 = jur.lower()[:2]
         if jur2 in _EXCHANGE_SUFFIX:
             steps.append(("directapi", "stock_ticker_lookup", {"query": name}))
+    if jur == "UZ" and not ident.get("directory_verified"):
+        steps.append(("directapi", "uz_company_records", {"query": name}))
+    if jur.upper() == "FI" and not ident.get("official_registry_verified"):
+        args = {"query": name}
+        bids = fi_business_id_values(task)
+        business_id = ident.get("business_id") or (bids[0] if len(bids) == 1 else None)
+        if business_id:
+            args["business_id"] = business_id
+        steps.append(("directapi", "fi_company_records", args))
     if looks_russian(name, task, jur):
         inn = ident.get("inn")
         if inn:

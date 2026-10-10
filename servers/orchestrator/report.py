@@ -124,7 +124,17 @@ def source_matrix(results: list[dict]) -> list[dict]:
     rdap_ip по разным IP. Такой знаменатель описывает размер веера, а не
     покрытие источниками, и в шапке отчёта выглядел как массовый провал."""
     by: dict[str, dict] = {}
+    records = []
     for r in results:
+        if r.get("phase") in ('corporate_research', 'organization_research'):
+            try:
+                nested = json.loads(r.get("text", "{}"))
+                records.extend(nested.get("calls", []))
+            except (ValueError, TypeError, AttributeError):
+                records.append(r)
+        else:
+            records.append(r)
+    for r in records:
         sid = r.get("server", "?")
         m = by.setdefault(sid, {"server": sid, "name": r.get("name") or sid,
                                 "tools": [], "calls": 0, "ok": 0, "failed": 0,
@@ -215,6 +225,8 @@ def _fmt_json(text: str) -> str:
 # (dossier.extract_* → sections). Дублировать их сырьё в приложении незачем —
 # именно на этом приложение разрасталось до 71% файла.
 CONSUMED: frozenset[tuple[str, str]] = frozenset({
+    ("orchestrator", "corporate_research"),
+    ('orchestrator', 'organization_research'),
     ("directapi", "gleif_entity"), ("directapi", "rdap_domain"),
     ("directapi", "rdap_ip"), ("directapi", "dns_records"),
     ("directapi", "crtsh"), ("directapi", "sec_edgar"),
@@ -602,7 +614,8 @@ def _protect_body_html(body: str) -> str:
                   lambda m: html.escape(m.group(0)), body, flags=re.I)
 
 
-def write_html(md_text: str, html_path: str, task: str = "", when: str = "") -> bool:
+def write_html(md_text: str, html_path: str, task: str = "", when: str = "",
+               attachments: dict[str, bytes] | None = None) -> bool:
     """Markdown → самодостаточный HTML (тёмная тема, боковое оглавление, Mermaid)."""
     try:
         import markdown as _md
@@ -655,6 +668,20 @@ def write_html(md_text: str, html_path: str, task: str = "", when: str = "") -> 
             "</body>",
             "</html>",
         ])
+        if attachments:
+            from portable import html_with_materials, nonpublic_url
+            from urllib.parse import unquote, urlsplit
+
+            def resolve_material(value, origin):
+                parsed = urlsplit(value)
+                filename = unquote(parsed.path).rsplit('/', 1)[-1]
+                if filename in attachments:
+                    return 'file', Path(html_path).parent / filename
+                if parsed.scheme in {'http', 'https', 'mailto', 'tel'} and not nonpublic_url(value):
+                    return 'public', value
+                return 'unresolved', None
+
+            page, _ = html_with_materials(page, Path(html_path), resolve_material)
         with open(html_path, "w", encoding="utf-8") as fh:
             fh.write(page)
         return True
@@ -840,7 +867,8 @@ summary { font-size: 8.5pt; color: #4a5a72; }
 
 
 def write_pdf(md_text: str, pdf_path: str, task: str = "",
-              when: str = "", meta: dict | None = None) -> bool:
+              when: str = "", meta: dict | None = None,
+              attachments: dict[str, bytes] | None = None) -> bool:
     """Markdown → красивый PDF (weasyprint). Возвращает True при успехе."""
     try:
         import markdown as _md
@@ -852,6 +880,17 @@ def write_pdf(md_text: str, pdf_path: str, task: str = "",
             md_text, extensions=["tables", "fenced_code", "sane_lists"])
 
         html_body = _protect_body_html(html_body)
+        if attachments:
+            import html as _html
+            for filename in attachments:
+                html_body = re.sub(r'(?<=href=[\x27\"])' + re.escape(filename) + r'(?=[\x27\"])',
+                                   '#report-materials', html_body)
+            html_body += ('<section id="report-materials"><h2>Материалы к отчёту</h2>'
+                          '<p>Полные ответы источников встроены в этот PDF. Откройте панель '
+                          '«Вложения» в программе просмотра PDF; просмотрщик браузера '
+                          'может их не показывать.</p><ul>'
+                          + ''.join('<li>' + _html.escape(name) + '</li>' for name in attachments)
+                          + '</ul></section>')
 
         # Убираем первый <h1> из тела — он уже вынесен в обложку
         html_body = re.sub(r'^<h1[^>]*>.*?</h1>\s*', '', html_body,
@@ -882,6 +921,18 @@ def write_pdf(md_text: str, pdf_path: str, task: str = "",
             body=html_body,
         )
         HTML(string=page).write_pdf(pdf_path)
+        if attachments:
+            from pypdf import PdfReader, PdfWriter
+            from pypdf.generic import NameObject, TextStringObject
+            writer = PdfWriter(clone_from=PdfReader(pdf_path))
+            for filename, data in attachments.items():
+                attachment = writer.add_attachment(filename, data)
+                attachment.description = TextStringObject('Полные материалы проверки')
+            writer._root_object[NameObject('/PageMode')] = NameObject('/UseAttachments')
+            import io
+            output = io.BytesIO()
+            writer.write(output)
+            Path(pdf_path).write_bytes(output.getvalue())
         return True
     except Exception:
         return False
@@ -904,32 +955,59 @@ def slugify(task: str) -> str:
     return f"{s}-{uuid.uuid4().hex[:6]}"
 
 
+def _report_url(url_base: str, filename: str, download: bool = False) -> str:
+    """Корректный URL для вложенных подборок и nginx /download/ alias."""
+    from urllib.parse import quote, unquote, urlsplit, urlunsplit
+    parsed = urlsplit(url_base)
+    path = parsed.path.rstrip('/') + '/' + filename
+    if download:
+        path = '/download/' + path.lstrip('/')
+    return urlunsplit((parsed.scheme, parsed.netloc, quote(unquote(path), safe='/._-'), '', ''))
+
+
 def save_report(task: str, results: list[dict], when: str,
                 reports_dir: str, url_base: str,
                 synthesis: str | None = None, identity: dict | None = None) -> dict:
     """Пишет .md + .html (+ .pdf best-effort). Возвращает {md_url, html_url, pdf_url, ...}."""
     os.makedirs(reports_dir, exist_ok=True)
-    md_text, meta = build_markdown(task, results, when, synthesis, identity)
     slug = slugify(task)
+    research_url = None
+    attachments = {}
+    for r in results:
+        if r.get("phase") in ('corporate_research', 'organization_research'):
+            import newdb
+            try:
+                evidence = newdb.sanitize(json.loads(r["text"]))
+            except (ValueError, KeyError):
+                continue
+            filename = f'{slug}.organization.research.json' if r['phase'] == 'organization_research' else f'{slug}.research.json'
+            with open(os.path.join(reports_dir, filename), "w", encoding="utf-8") as fh:
+                json.dump(evidence, fh, ensure_ascii=False, indent=2)
+            attachments[filename] = Path(reports_dir, filename).read_bytes()
+            research_url = research_url or _report_url(url_base, filename)
+            label = 'Материалы целевой проверки: люди, договоры и источники' if r['phase'] == 'organization_research' else 'Материалы корпоративной проверки: документы, даты и ответы источников'
+            synthesis = (synthesis or "") + f'\n\n[{label}]({filename})\n'
+    md_text, meta = build_markdown(task, results, when, synthesis, identity)
     md_path = os.path.join(reports_dir, f"{slug}.md")
     with open(md_path, "w", encoding="utf-8") as fh:
         fh.write(md_text)
     # HTML — главный формат для браузера (тёмная тема, оглавление, Mermaid).
     html_url = html_dl_url = None
     html_path = os.path.join(reports_dir, f"{slug}.html")
-    if write_html(md_text, html_path, task, when):
-        html_url = f"{url_base}/{slug}.html"
-        html_dl_url = f"{url_base}/download/{slug}.html"
+    if write_html(md_text, html_path, task, when, attachments=attachments):
+        html_url = _report_url(url_base, f"{slug}.html")
+        html_dl_url = _report_url(url_base, f"{slug}.html", download=True)
     # PDF — best-effort; при сбое weasyprint молча пропускается.
     pdf_url = pdf_dl_url = None
     pdf_path = os.path.join(reports_dir, f"{slug}.pdf")
-    if write_pdf(md_text, pdf_path, task=task, when=when, meta=meta):
-        pdf_url = f"{url_base}/{slug}.pdf"
+    if write_pdf(md_text, pdf_path, task=task, when=when, meta=meta, attachments=attachments):
+        pdf_url = _report_url(url_base, f"{slug}.pdf")
         # /download/ отдаёт тот же файл с Content-Disposition: attachment
         # (см. config/reports-nginx.conf) — «Сохранить как…» вместо просмотра.
-        pdf_dl_url = f"{url_base}/download/{slug}.pdf"
+        pdf_dl_url = _report_url(url_base, f"{slug}.pdf", download=True)
     return {"markdown": md_text, "meta": meta,
-            "md_url": f"{url_base}/{slug}.md",
-            "md_dl_url": f"{url_base}/download/{slug}.md",
+            "md_url": _report_url(url_base, f"{slug}.md"),
+            "md_dl_url": _report_url(url_base, f"{slug}.md", download=True),
             "html_url": html_url, "html_dl_url": html_dl_url,
-            "pdf_url": pdf_url, "pdf_dl_url": pdf_dl_url, "slug": slug}
+            "pdf_url": pdf_url, "pdf_dl_url": pdf_dl_url, "slug": slug,
+            "research_url": research_url}

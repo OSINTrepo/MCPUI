@@ -3,3 +3,4 @@ httpx
 dnspython
 yfinance>=0.2.36
 beautifulsoup4>=4.12
+pypdf>=5,<7

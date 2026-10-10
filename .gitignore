@@ -8,6 +8,7 @@
 
 # --- generated OSINT reports (may contain PII) ---
 reports/
+data/whois-history-cache/
 *.pdf
 
 # --- reference/target dossiers (PII, do not distribute) ---
@@ -27,3 +28,7 @@ scratchpad/
 
 # --- резервные копии базы и ключей ---
 backups/
+
+# --- локальные заметки о расследованиях и балансах API ---
+CURRENT_STATE.md
+API_RENEWAL_STATUS.md

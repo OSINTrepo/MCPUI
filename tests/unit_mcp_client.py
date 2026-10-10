@@ -15,6 +15,32 @@ class MCPClientTests(unittest.IsolatedAsyncioTestCase):
         with patch('mcp_client.httpx.AsyncClient', side_effect=lambda **kw: original(transport=httpx.MockTransport(handler), **kw)):
             return await getattr(MCPClient('https://example.org/mcp?api_key=DO-NOT-EXPOSE'), operation)(*([tool, {}] if operation == 'call' else []))
 
+    async def test_full_paid_whois_history_remains_parseable_beyond_transport_limits(self):
+        records = [{"registrant": f"Historic organization {index}",
+                    "audit": {"createdDate": f"{2000 + index // 12}-{index % 12 + 1:02d}-01"},
+                    "registrarName": "Historical registrar " + "x" * 300}
+                   for index in range(1500)]
+        history = {"domain": "example.com", "records": records,
+                   "cache": {"status": "hit", "fetched_at": "2026-10-02T04:00:00Z"}}
+        payload = json.dumps(history)
+        self.assertGreater(len(payload), 500000)
+        def handler(req):
+            if req.method == 'DELETE':
+                return httpx.Response(200)
+            body = json.loads(req.content)
+            if body['method'] == 'initialize':
+                return httpx.Response(200, headers={'Mcp-Session-Id': 's'}, json={'result': {}})
+            if body['method'] == 'notifications/initialized':
+                return httpx.Response(202)
+            return httpx.Response(200, json={'result': {'content': [{'type': 'text', 'text': payload}]}})
+        with patch('mcp_client.MAX_TEXT', 100):
+            result = await self.exercise(handler, 'call', 'whois_history')
+        self.assertTrue(result['ok'])
+        received = json.loads(result['text'])
+        self.assertEqual(received, history)
+        self.assertEqual(len(received['records']), 1500)
+        self.assertEqual(received['records'][-1]['registrant'], 'Historic organization 1499')
+
     async def test_financial_history_is_not_cut_before_recent_years(self):
         payload = json.dumps({'data': {'history': 'x' * 25000, '2025': {'2110': 412062000}}})
         def handler(req):

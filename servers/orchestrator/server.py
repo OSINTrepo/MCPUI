@@ -13,6 +13,7 @@ import json
 import os
 import re
 import time
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -24,6 +25,9 @@ import entity
 import recipes
 import report
 import sections
+import russia_links
+import corporate_research
+import organization_research
 from mcp_client import MCPClient
 
 CATALOG_PATH = Path(os.environ.get("CATALOG_PATH", "/app/catalog.json"))
@@ -36,6 +40,8 @@ MODEL = os.environ.get("ORCHESTRATOR_MODEL", "GigaChat-2-Pro")
 REPORT_MODEL = os.environ.get("ORCHESTRATOR_REPORT_MODEL", MODEL)
 # Глубокое досье по домену/IP (веер VT-связей + RDAP/crt.sh/DNS/GLEIF/Censys).
 DOMAIN_DEEP = os.environ.get("ORCHESTRATOR_DOMAIN_DEEP", "1") not in ("0", "false", "")
+_FORCE_HISTORY_REFRESH = ContextVar("force_history_refresh", default=False)
+_RESEARCH_SOURCE_URLS = ContextVar('research_source_urls', default=())
 # Сколько VT-связей звать (free-тариф ~4 req/min; платный ключ — можно поднять).
 # 4, а не 5: столько же стоит в registry/servers.yaml (реестр — источник правды),
 # и historical_whois всё равно лучше закрывается отдельным whois_history.
@@ -48,6 +54,9 @@ COMPANY_DOMAINS_CAP = int(os.environ.get("ORCHESTRATOR_COMPANY_DOMAINS", "1"))
 # Фаза 0 — разрешение сущности компании до корпоративного веера (entity.py).
 # ORCHESTRATOR_ENTITY_RESOLVE=0 возвращает прежнее поведение (веер сырой строкой).
 ENTITY_RESOLVE = os.environ.get("ORCHESTRATOR_ENTITY_RESOLVE", "1") not in ("0", "false", "")
+CORPORATE_RESEARCH = os.environ.get("ORCHESTRATOR_CORPORATE_RESEARCH", "1") not in ("0", "false", "")
+RESEARCH_DEADLINE = max(10, min(600, float(os.environ.get("ORCHESTRATOR_RESEARCH_DEADLINE", "240"))))
+RESEARCH_CALLS = max(1, min(100, int(os.environ.get("ORCHESTRATOR_RESEARCH_CALLS", "64"))))
 # Бюджет разведочной волны. Тратится из ОБЩЕГО SOFT_DEADLINE, а не сверх него.
 RESOLVE_DEADLINE = float(os.environ.get("ORCHESTRATOR_RESOLVE_DEADLINE", "45"))
 # Звать ли платные источники (x402-кошелёк и т.п.). По умолчанию нет: без оплаты
@@ -138,10 +147,17 @@ def select_servers(target_type: str) -> list[str]:
     return others[:PER_TARGET]
 
 
+def _mcp_headers(sid: str, endpoint: str) -> dict:
+    if sid == "newdb" and endpoint == "https://api.newdb.net/mcp":
+        token = os.environ.get("NEWDB_MCP_TOKEN", "")
+        return {"Authorization": "Bearer " + token} if token else {}
+    return {}
+
+
 async def pick_generic_call(sid: str, endpoint: str, target: dict) -> dict | None:
     """Для сервера без curated-рецепта: выбрать tool+args (LLM, иначе эвристика)."""
     try:
-        tools = await asyncio.wait_for(MCPClient(endpoint).list_tools(), timeout=30)
+        tools = await asyncio.wait_for(MCPClient(endpoint, headers=_mcp_headers(sid, endpoint)).list_tools(), timeout=30)
     except Exception:
         return None
     if not tools:
@@ -207,10 +223,12 @@ async def run_one(sid: str, target: dict,
                 return {"server": sid, "name": label, "ok": False,
                         "text": "источник недоступен (не удалось выбрать инструмент)"}
             tool, args = pick["tool"], pick["arguments"]
+    if sid in ("whoisxml", "directapi") and tool == "whois_history" and _FORCE_HISTORY_REFRESH.get():
+        args = {**args, "force_refresh": True}
     # Персональный таймаут для медленных источников (maigret/openosint). Важно:
     # передаём его В САМ MCPClient (у него свой httpx-таймаут 60с) — иначе httpx
     # рвал бы соединение на 60с раньше нашего лимита (ReadTimeout у maigret ~62с).
-    timeout = (90 if tool in ("corporate_website", "borme_publications", "resolve_hosts", "sec_financials") or sid == "virustotal" else
+    timeout = (120 if tool == "russia_connections" else 90 if tool in ("corporate_website", "borme_publications", "resolve_hosts", "sec_financials", "uz_company_records") or sid == "virustotal" else
                SERVER_TIMEOUT.get(sid, CALL_TIMEOUT))
     try:
         # Ограничиваем ОДНОВРЕМЕННЫЕ сессии к ОДНОМУ серверу: supergateway (stdio→HTTP)
@@ -219,13 +237,18 @@ async def run_one(sid: str, target: dict,
         # сериализует их пачками, все доходят (чуть дольше, но надёжно).
         async with _server_sem(sid):
             res = await asyncio.wait_for(
-                MCPClient(endpoint, timeout=timeout).call(tool, args), timeout=timeout + 5)
+                MCPClient(endpoint, headers=_mcp_headers(sid, endpoint), timeout=timeout).call(tool, args), timeout=timeout + 5)
     except asyncio.TimeoutError:
         return {"server": sid, "name": label, "tool": tool, "args": args, "ok": False,
                 "text": "источник недоступен (таймаут)"}
     except Exception as e:
         return {"server": sid, "name": label, "tool": tool, "args": args, "ok": False,
                 "text": f"источник недоступен ({type(e).__name__})"}
+    if sid == "newdb":
+        import newdb
+        cleaned = newdb.sanitize(_json_from(res["text"]) or res["text"],
+                                 os.environ.get("NEWDB_MCP_TOKEN", ""))
+        res["text"] = json.dumps(cleaned, ensure_ascii=False) if isinstance(cleaned, dict) else cleaned
     return {"server": sid, "name": label, "tool": tool, "args": args,
             "ok": res["ok"], "text": res["text"] or ("пусто" if res["ok"] else "ошибка")}
 
@@ -320,8 +343,14 @@ def build_plan(task: str, identity: dict | None = None) -> dict:
     targets = recipes.detect_targets(task)
     if not targets:
         targets = [{"type": "query", "value": task.strip()}]
+    has_company = any(t["type"] == "company" for t in targets)
     steps = []
     for tg in targets:
+        # In a company Russia-focus task, explicitly supplied candidate INNs are
+        # checked in one bounded NewDB batch later. Avoid duplicating those calls
+        # against Checko, whose free-tier daily quota can already be exhausted.
+        if russia_links.requested(task) and has_company and tg["type"] == "inn":
+            continue
         # Домен/IP в авто-режиме → глубокий веер (как в референс-досье).
         if DOMAIN_DEEP and tg["type"] in ("domain", "ip"):
             steps.extend(_deep_steps(tg))
@@ -371,7 +400,8 @@ async def resolve_entity(task: str, company: str,
     probes = entity.parse_probes(probe_results)
     domains = entity.domain_candidates(company, probes)
     explicit = [t["value"] for t in recipes.detect_targets(task) if t["type"] == "domain"]
-    identity = entity.resolve(company, probes, explicit or domains[:1])
+    # Угаданный домен — кандидат, а не независимое подтверждение юрлица.
+    identity = entity.resolve(company, probes, explicit, recipes.country_hint(task))
     identity["domain_candidates"] = domains
     return identity, probe_results
 
@@ -395,6 +425,11 @@ _ERR_HINT = ("not installed", "not in path", "scan error", "traceback",
 _FAIL_PATTERNS: list[tuple[tuple[str, ...], str]] = [
     (("payment required", "402", "no valid session", "x402", "insufficient balance",
       "balance is 0", "\"balance\": 0", "requires payment"), "нужен баланс/оплата"),
+    # Checko returns HTTP 403 for the free-tier daily cap. Classify the provider's
+    # explicit quota message before the generic 403/authentication rule.
+    (("суточный лимит", "daily limit", "today_request_count", "quota exceeded",
+      "превышен лимит запросов", "лимит запросов для бесплатного тарифа"),
+     "суточная квота исчерпана"),
     (("unauthorized", "forbidden", "401", "403", "provide your api key",
       "no api key", "invalid api key", "api key required", "missing api key"), "нужен ключ"),
     (("-32602", "invalid tools/call result", "invalid_type",
@@ -472,6 +507,18 @@ def _json_error(text: str) -> str | None:
         return None
     err = j.get("error")
     if j.get("success") is False or j.get("status") == "error" or err:
+        # Типизированный отказ провайдера точнее эвристики «403 = нет ключа».
+        # Ключ может работать для WHOIS, а доступ к истории зависеть от другого баланса.
+        labels = {"missing_key": "нужен ключ", "authentication_failed": "ключ не принят провайдером",
+                  "access_denied": "доступ к продукту ограничен; проверьте его баланс и права ключа",
+                  "quota_exhausted": "кредиты или квота продукта исчерпаны",
+                  "rate_limited": "лимит запросов", "invalid_response": "сервер вернул битый ответ",
+                  "provider_unavailable": "нет связи с источником"}
+        kinds = [j.get("error_type")] + [p.get("error_type") for p in (j.get("provider_errors") or [])
+                                        if isinstance(p, dict)]
+        typed = list(dict.fromkeys(labels[k] for k in kinds if isinstance(k, str) and k in labels))
+        if typed:
+            return "; ".join(typed)
         msg = err if isinstance(err, str) and err.strip() else "источник вернул ошибку"
         return _fail_reason(msg) or re.sub(r"\s+", " ", msg)[:120]
     return None
@@ -508,7 +555,7 @@ def _identity_lines(identity: dict) -> list[str]:
         cands = [c["name"] for c in (identity.get("candidates") or [])
                  if c.get("sources") != ["query"]][:3]
         line = (f"**Идентификация:** юрлицо по запросу «{identity.get('query')}» "
-                f"НЕ подтверждено — данные реестров не утверждаются.")
+                f"НЕ подтверждено — регистрационные сведения самой цели не установлены.")
         if cands:
             line += " Кандидаты: " + ", ".join(f"«{c}»" for c in cands) + "."
         return [line]
@@ -695,14 +742,39 @@ _SECTION_COMMENT_SYSTEM = (
     "аналитический комментарий к каждой указанной секции досье — что это значит / на "
     "что обратить внимание. СТРОГО по фактам, без домыслов и без выдумывания. "
     "Верни СТРОГО JSON {\"id_секции\": \"комментарий\"} только для секций из списка; "
+    "Каждой секции соответствует отдельный блок фактов. Не переноси сведения между секциями. "
+    "Не утверждай отсутствие результатов в заполненной секции. "
+    "WHOIS-контакт не доказывает владение или намеренное сокрытие владельца. "
+    "Доступность сайта и отсутствие детекций не подтверждают законность деятельности. "
+    "Сходство имени домена не доказывает фишинг; общий IP не доказывает связь организаций. "
     "если по секции сказать нечего — пропусти её.")
+
+
+async def extract_organization_facts(task, company, pages):
+    segmented = organization_research.segmented_pages(pages)
+    answer = await llm([
+        {'role': 'system', 'content': organization_research.EXTRACT_PROMPT},
+        {'role': 'user', 'content': json.dumps({'task': task, 'company': company,
+            'pages': segmented}, ensure_ascii=False)}
+    ], max_tokens=4500, model=REPORT_MODEL)
+    extracted = _json_from(answer or '')
+    if not isinstance(extracted, dict) or not isinstance(extracted.get('claims'), list):
+        raise ValueError('неполный структурированный ответ модели')
+    return organization_research.grounded_segments(extracted, segmented)
 
 
 async def section_comments(kind: str, target: str, data: dict, facts: dict) -> dict:
     """Один батч-вызов LLM: краткий комментарий к каждой заполненной секции.
     Graceful: {} при отсутствии LLM/ключа (секции рендерятся без комментариев)."""
-    ids = [sid for sid in sections.populated_ids(kind, data, {"target": target})
-           if sid != "c_financials"]
+    # Каждый комментарий получает именно отрисованные данные своей секции.
+    # Общая сводка раньше не содержала поиска и DNS, вызывая ложные отрицания.
+    blocks = {}
+    for section in sections.SECTIONS:
+        if kind in section.applies_to and section.id not in sections.NO_LLM_COMMENTS:
+            block = section.render(data, {"target": target, "identity": data.get("identity")}) or []
+            if block:
+                blocks[section.id] = "\n".join(block)[:9000]
+    ids = list(blocks)
     if not ids:
         return {}
     titles = {sid: sections.TITLES.get(sid, sid) for sid in ids}
@@ -710,7 +782,7 @@ async def section_comments(kind: str, target: str, data: dict, facts: dict) -> d
         {"role": "system", "content": _SECTION_COMMENT_SYSTEM},
         {"role": "user", "content": f"Цель ({kind}): {target}\nСЕКЦИИ (id: заголовок): "
          f"{json.dumps(titles, ensure_ascii=False)}\nФАКТЫ (JSON):\n"
-         f"{json.dumps(facts, ensure_ascii=False)}"}],
+         f"{json.dumps(blocks, ensure_ascii=False)}"}],
         max_tokens=1400, model=REPORT_MODEL)
     j = _json_from(out or "")
     if not isinstance(j, dict):
@@ -725,7 +797,9 @@ async def build_domain_dossier(domain: str, results: list[dict]) -> str | None:
     facts = dossier.data_for_llm(domain, data)
     comments = await section_comments("domain", domain, data, facts)
     secs = sections.render_target("domain", data, {"target": domain, "comments": comments})
-    if not secs:
+    research = corporate_research.render(corporate_research.from_results(results)) if any(
+        r.get("phase") == corporate_research.PHASE for r in results) else []
+    if not secs and not research:
         return None
     summary, conclusions = await synthesize_narrative(domain, facts)
     md = [f"# Аналитическое досье по домену {domain}", ""]
@@ -738,6 +812,7 @@ async def build_domain_dossier(domain: str, results: list[dict]) -> str | None:
     md += secs
     if conclusions:
         md += ["## Выводы", "", conclusions, ""]
+    md += research
     return "\n".join(md)
 
 
@@ -783,12 +858,162 @@ _COMPANY_NARRATIVE_SYSTEM = (
     "дат. Если данных мало — пиши коротко и честно. Санкции/негатив утверждай лишь при "
     "наличии в фактах. Не выводи имена JSON-полей, null и служебные счётчики в текст. "
     "not_collected означает отсутствие проверки, а не отсутствие совпадений.\n"
-    "СБОЙ ИСТОЧНИКА — НЕ ФАКТ. Если слой указан в sources_failed, пиши «данных нет "
-    "(источник недоступен: <причина>)». ЗАПРЕЩЕНО превращать недоступность инструмента "
+    "russia_connections — отдельная целевая проверка. source_reported означает сообщение источника, "
+    "не независимо подтверждённую действующую связь. Не называй кандидатов подтверждёнными. "
+    "Гражданство нельзя выводить по имени, языку, работе или регистрации ИП. "
+    "organization_research содержит целевые вопросы о людях, договорах, финансировании и иностранных связях. "
+    "Если этот слой получен, в резюме и выводах прежде всего отвечай на эти вопросы, а не перечисляй сетевые показатели. "
+    "Называй источники и периоды ролей; артист, внешний подрядчик и сотрудник — разные категории. "
+    "Публичная биография с российским местом проживания — документированная биографическая связь, "
+    "её не отрицай пустым результатом поиска российских юрлиц или отсутствием данных о гражданстве. "
+    "При расхождении ролей учитывай source_published_at, source_document_date и явный source_role_periods. "
+    "Должность из старой программы мероприятия не является текущей; сохраняй её историческую дату. "
+    "Связь через общего члена правления не означает владение или договор организаций. "
+    "Публичные условия платформы не доказывают индивидуальный подписанный контракт или его суммы. "
+    "Финские rf/ry означают зарегистрированное объединение, а не РФ; у объединения нельзя выдумывать акционеров и доли. "
+    "fi_registry.matched=false отражает охват коммерческого API и не опровергает существование объединения. "
+    "Раскрытые на сайте название и Business ID передавай как сведения сайта, даже если государственная выписка не получена. "
+    "Не устанавливай отсутствие связей по пустой выдаче или ошибке источника. "
+    "corporate_research содержит отдельные проверенные реестровые карточки кандидатов "
+    "и связанных через реестр юрлиц. identity_verified подтверждает регистрацию конкретной "
+    "компании, но не её принадлежность исследуемому бренду или владение доменом. "
+    "Если verified_company_count > 0, сведения реестра получены: нельзя писать, что "
+    "реестры целиком недоступны, даже при сбоях отдельных запросов. "
+    "registry_related_ogrn — переход по реестровой записи о лице, не дочерняя компания "
+    "и не подтверждённая группа. Роли и статусы описывай с датами записей; "
+    "историческую должность нельзя представлять как действующую. "
+    "Показатели отдельных юрлиц не суммируй и не приписывай бренду. "
+    "whois_history — датированные исторические записи, а не текущие владельцы. "
+    "Совпадение организации-регистранта у доменов — исторический признак связи, "
+    "не доказательство точного юрлица, гражданства или владения сегодня. "
+    "Дату снимка отличай от даты регистрации и изменения домена. "
+    "Сопоставляй прошлые записи с текущим WHOIS: AVAILABLE и MISSING_WHOIS_DATA "
+    "не подтверждают действующую регистрацию или текущего владельца. "
+    "uz_directory — коммерческие справочники, не государственная выписка. "
+    "Называй справочник по directory_sources.name, не по служебному ключу uz_directory. "
+    "Orginfo, MyOrg и iHamkor НЕ являются государственными реестрами или первичными выписками. "
+    "В checks не предлагай их как официальный реестр. Не выводи not_collected в текст. "
+    "Указывай ограничения актуальности; поля conflicts нельзя сводить к одному значению. "
+    "IP и сервисы публичных индексов могут относиться к общему хостингу. "
+    "СБОЙ ИСТОЧНИКА — НЕ ФАКТ. sources_failed описывает сбои конкретных запросов, "
+    "а не отсутствие всех данных провайдера. Уточняй, какой инструмент или реквизит "
+    "не получен; успешные реестровые карточки и проверки сохраняют силу. "
+    "ЗАПРЕЩЕНО превращать недоступность инструмента "
     "в отрицательный вывод («должностных лиц нет», «санкций не найдено»).\n"
     "ИДЕНТИФИКАЦИЯ: если identity.legal_name пуст или confidence='низкая' — НЕ утверждай "
-    "юрлицо, юрисдикцию и регистрационные данные; пиши, что сущность не подтверждена, и "
-    "описывай только инфраструктуру.")
+    "юрлицо, юрисдикцию и регистрационные данные самой цели; пиши, что сущность не подтверждена. "
+    "Отдельно описывай полученные карточки кандидатов и их реестровые связи с оговоркой, "
+    "что связь с целью не установлена. Неопознанное юрлицо не отменяет сведения о точном "
+    "бренде или домене из прочитанных публикаций и архивов: передавай их с атрибуцией "
+    "источнику и датой, не превращая заявления в доказанную виновность.")
+
+
+def _corporate_research_facts(research: dict, identity: dict | None) -> dict | None:
+    """Ограниченная выборка для резюме: реестровая личность отдельно от связи с целью."""
+    if not isinstance(research, dict) or not research:
+        return None
+
+    def text(value, limit=450):
+        if value is None:
+            return None
+        # ИНН физлиц не нужен писателю отчёта; полные карточки остаются в доказательствах.
+        return re.sub(r"\b\d{12}\b", "[идентификатор физлица скрыт]", str(value))[:limit]
+
+    verified = [item for item in research.get("companies", []) if isinstance(item, dict)
+                and item.get("identity_verified") is True
+                and isinstance(item.get("card"), dict)
+                and str(item.get("card", {}).get("ИНН")) == str(item.get("inn"))
+                and corporate_research.valid_inn(item.get("inn"))]
+    profiles = []
+    for item in verified[:12]:
+        card, seed = item["card"], item.get("seed") or {}
+        relationship = seed.get("relationship") or {}
+        officers = [{"name": text(person.get("ФИО")), "role": text(person.get("НаимДолжн")),
+                     "record_date": text(person.get("ДатаЗаписи"))}
+                    for person in (card.get("Руковод") or [])[:6] if isinstance(person, dict)]
+        checks = item.get("checks") or {}
+        finance_check = checks.get("get_finances") or {}
+        finances = (finance_check.get("response", {}).get("data") or {}
+                    if finance_check.get("status") == "received" else {})
+        years = []
+        if isinstance(finances, dict):
+            for year in sorted(finances, key=str, reverse=True)[:3]:
+                values = finances[year]
+                if not isinstance(values, dict):
+                    continue
+                metrics = {}
+                for code, label in (("1600", "assets"), ("2110", "revenue"), ("2400", "net_profit")):
+                    value = values.get(code)
+                    amount = value.get("СумОтч") if isinstance(value, dict) else value
+                    if type(amount) in (int, float):
+                        metrics[label] = amount
+                if metrics:
+                    years.append({"year": text(year, 10), "currency": "RUB", **metrics})
+        target_match = bool(identity and identity.get("legal_name")
+                            and identity.get("jurisdiction") == "RU"
+                            and str(identity.get("inn")) == str(item["inn"]))
+        ogrn = str(card.get("ОГРН") or "")
+        profiles.append({
+            "name": text(card.get("НаимСокр") or card.get("НаимПолн")),
+            "inn": str(item["inn"]), "ogrn": ogrn or None, "identity_verified": True,
+            "target_identity_match": target_match,
+            "target_affiliation": "not_established" if not target_match else "resolved_legal_identity",
+            "domain_ownership_verified": item.get("domain_ownership_verified") is True,
+            "registered_at": text(card.get("ДатаРег")),
+            "status": text((card.get("Статус") or {}).get("Наим")),
+            "liquidated_at": text((card.get("Ликвид") or {}).get("Дата")),
+            "extract_date": text(card.get("ДатаВып")), "officers": officers,
+            "seed_basis": text(seed.get("basis")), "seed_source_url": text(seed.get("url"), 1000),
+            "registry_relationship": ({"source_company_inn": text(relationship.get("company")),
+                                       "role": text(relationship.get("role")),
+                                       "person": text(relationship.get("person")),
+                                       "scope": "Переход по реестровой записи о лице; не принадлежность группе"}
+                                      if seed.get("basis") == "registry_related_ogrn" else None),
+            "source_url": f"https://checko.ru/company/{ogrn}" if re.fullmatch(r"\d{13}", ogrn) else None,
+            "available_checks": [tool for tool, result in checks.items()
+                                 if isinstance(result, dict) and result.get("status") == "received"][:10],
+            "financials": years,
+        })
+    return {"verified_company_count": len(verified), "profiles": profiles,
+            "scope": "Регистрация кандидатов подтверждена отдельно; связь с брендом и владение доменами требуют доказательств",
+            "claims": [{"text": text(claim.get("text")), "source_url": text(claim.get("url"), 1000),
+                        "snapshot": text(claim.get("snapshot")), "quote": text(claim.get("quote"))}
+                       for claim in research.get("claims", [])[:8] if isinstance(claim, dict)],
+            "mentions": [{"name": text(mention.get("name")), "kind": text(mention.get("kind")),
+                          "source_url": text(mention.get("url"), 1000), "quote": text(mention.get("quote"))}
+                         for mention in research.get("mentions", [])[:12] if isinstance(mention, dict)],
+            "pages": [{"url": text(page.get("url"), 1000), "snapshot": text(page.get("snapshot")),
+                       "retrieved_at": text(page.get("retrieved_at")), "historical": page.get("historical") is True}
+                      for page in research.get("pages", [])[:12] if isinstance(page, dict)]}
+
+
+_NARRATIVE_METADATA = re.compile(
+    r"\b(?:legal_name|confidence|identity_verified|target_affiliation|"
+    r"domain_ownership_verified|not_established|not_collected|source_reported|"
+    r"russia_connections|registry_related_ogrn|verified_company_count)\b")
+
+
+def _human_narrative(value) -> str:
+    """Перевод служебных меток без повторной генерации фактов и отрицаний."""
+    text = _as_lines(value)
+    for field, positive, negative in (
+        ("domain_ownership_verified", "владение доменом подтверждено", "владение доменом не подтверждено"),
+        ("identity_verified", "регистрация юрлица подтверждена", "регистрация юрлица не подтверждена"),
+    ):
+        for flag, phrase in (("true", positive), ("false", negative)):
+            text = re.sub(rf"\b{field}\s*(?:=|:|—)\s*{flag}\b", phrase, text)
+    labels = {
+        "legal_name": "юридическое наименование", "confidence": "уверенность",
+        "identity_verified": "подтверждение регистрации юрлица",
+        "target_affiliation": "принадлежность бренду",
+        "domain_ownership_verified": "подтверждение владения доменом",
+        "not_established": "не установлена", "not_collected": "проверка не проводилась",
+        "source_reported": "по сообщению источника",
+        "russia_connections": "проверка российских связей",
+        "registry_related_ogrn": "реестровая связь через ОГРН",
+        "verified_company_count": "число подтверждённых карточек юрлиц",
+    }
+    return _NARRATIVE_METADATA.sub(lambda match: labels[match.group()], text)
 
 
 async def synthesize_company_narrative(name: str, cdata: dict, infra: list[dict],
@@ -798,6 +1023,8 @@ async def synthesize_company_narrative(name: str, cdata: dict, infra: list[dict]
     """LLM пишет резюме/выводы/предположения/проверки по КОМПАКТНЫМ фактам компании.
     Возвращает ('','','','') при сбое (тогда используем детерминированное резюме)."""
     compact = dossier.company_data_for_llm(name, cdata, infra, identity, failed)
+    if cdata.get("corporate_research"):
+        compact["corporate_research"] = cdata["corporate_research"]
     out = await llm([
         {"role": "system", "content": _COMPANY_NARRATIVE_SYSTEM},
         {"role": "user", "content": f"ФАКТЫ по компании {name} (JSON):\n"
@@ -805,8 +1032,8 @@ async def synthesize_company_narrative(name: str, cdata: dict, infra: list[dict]
         max_tokens=2200, model=REPORT_MODEL)
     j = _json_from(out or "")
     if j and (j.get("summary") or j.get("conclusions")):
-        return (_as_lines(j.get("summary")), _as_lines(j.get("conclusions")),
-                _as_lines(j.get("assumptions")), _as_lines(j.get("checks")))
+        return (_human_narrative(j.get("summary")), _human_narrative(j.get("conclusions")),
+                _human_narrative(j.get("assumptions")), _human_narrative(j.get("checks")))
     return (out.strip() if out else "", "", "", "")
 
 
@@ -816,7 +1043,16 @@ def _domain_results(results: list[dict], domain: str) -> list[dict]:
     out = []
     for r in results:
         tv = r.get("target_value")
-        if (tv is None or tv == domain
+        if tv is None and r.get("tool") in ("whois_current", "whois_history"):
+            tv = (r.get("args") or {}).get("domain")
+            if tv is None:
+                payload = _json_from(r.get("text", "") or "")
+                if isinstance(payload, dict):
+                    tv = payload.get("domain") or payload.get("domain_name")
+        matches_domain = tv == domain
+        if tv is not None and r.get("tool") in ("whois_current", "whois_history"):
+            matches_domain = dossier._history_domain_key(tv) == dossier._history_domain_key(domain)
+        if (tv is None or matches_domain
                 or (r.get("server") == "directapi" and r.get("tool") == "rdap_ip")):
             out.append(r)
     return out
@@ -891,6 +1127,17 @@ async def build_company_dossier(name: str, domains: list[dict | str],
     None → нет значимых данных (тогда отчёт соберётся общим синтезом)."""
     cdata = dossier.extract_company_data(results, identity)
     cdata["identity"] = identity
+    cdata["corporate_research"] = _corporate_research_facts(
+        corporate_research.from_results(results), identity)
+    focus = cdata.get("russia_connections")
+    if focus and focus.get("people") and focus.get("pages"):
+        extracted = await llm([
+            {"role": "system", "content": russia_links.EXTRACTION_PROMPT},
+            {"role": "user", "content": json.dumps({"people": focus["people"],
+             "pages": [{"url": p["url"], "text": p.get("text", "")[:14000]}
+                       for p in focus["pages"]]}, ensure_ascii=False)}],
+            max_tokens=2200, model=REPORT_MODEL)
+        focus["employment"] = russia_links.verified_employment(_json_from(extracted or "") or {}, focus)
     official_data = cdata.get("official") or {}
     if official_data.get("pages"):
         import official
@@ -972,15 +1219,22 @@ async def build_company_dossier(name: str, domains: list[dict | str],
             infra_md += dsections
             infra_facts.append({k: facts[k] for k in (
                 "domain", "ip_count", "subdomain_count", "cert_count",
-                "subdomain_groups", "mail", "reputation", "shodan_ports") if k in facts})
+                "subdomain_groups", "mail", "reputation", "shodan_ports",
+                "whois", "whois_history") if k in facts})
     if not org_sections and not infra_md:
         return None
-    summary, conclusions, assumptions, checks = await synthesize_company_narrative(
-        display, cdata, infra_facts, identity, dossier.failed_sources(results))
+    targeted = cdata.get('organization_research') or {}
+    if targeted.get('claims'):
+        summary = organization_research.brief(targeted)
+        conclusions, assumptions, checks = '', '', ''
+    else:
+        summary, conclusions, assumptions, checks = await synthesize_company_narrative(
+            display, cdata, infra_facts, identity, dossier.failed_sources(results))
     # Заголовок честен насчёт статуса опознания: неподтверждённая сущность не
     # выдаётся за установленный факт.
     unresolved = bool(identity) and not identity.get("legal_name")
-    title = f"# Аналитическое досье по компании {display}"
+    subject = 'организации' if cdata.get('organization_research') else 'компании'
+    title = f"# Аналитическое досье по {subject} {display}"
     if unresolved:
         title += " (сущность не подтверждена)"
     md = [title, ""]
@@ -1002,6 +1256,8 @@ async def build_company_dossier(name: str, domains: list[dict | str],
         md += ["## Для проверки (пассивно)", "", checks, ""]
     md += report.source_matrix_section(results)
     md += dossier.render_limitations(results, CATALOG, identity)
+    if any(r.get("phase") == corporate_research.PHASE for r in results):
+        md += corporate_research.render(corporate_research.from_results(results))
     return "\n".join(md)
 
 
@@ -1118,8 +1374,33 @@ async def enrich_shodan(results: list[dict], domain: str, limit: int = 4) -> lis
 
 
 # --------------------------------- tools -----------------------------------
+def _history_refresh_requested(task: str) -> bool:
+    """Повторная сборка не означает новую покупку: нужен явный запрос обновления."""
+    return bool(re.search(
+        r"(?:принудительно\s+обнов\w*\s+(?:истори\w*\s+)?whois|"
+        r"обнов\w*\s+(?:истори\w*\s+)?whois(?:\s+history)?\s+без\s+к[эе]ша|"
+        r"force\s+refresh\s+whois(?:\s+history)?|"
+        r"refresh\s+whois(?:\s+history)?\s+without\s+cache)", task, re.I))
+
+
 @mcp.tool()
-async def investigate(task: str, ctx: Context | None = None) -> str:
+async def investigate(task: str, ctx: Context | None = None, refresh_history: bool = False,
+                      source_urls: list[str] | None = None) -> str:
+    """Провести OSINT-расследование и вернуть готовое досье. Передай задачу пользователя.
+    История WHOIS повторно используется до суток без потери записей. Только если
+    пользователь просит обновить её сейчас, передай refresh_history=True: это новая
+    платная покупка истории. Текущие WHOIS/DNS и остальные источники проверяются отдельно."""
+    token = _FORCE_HISTORY_REFRESH.set(refresh_history or _history_refresh_requested(task))
+    urls_token = _RESEARCH_SOURCE_URLS.set(tuple(url for url in (source_urls or [])[:20]
+                                               if isinstance(url, str) and corporate_research.safe_url(url)))
+    try:
+        return await _investigate(task, ctx)
+    finally:
+        _FORCE_HISTORY_REFRESH.reset(token)
+        _RESEARCH_SOURCE_URLS.reset(urls_token)
+
+
+async def _investigate(task: str, ctx: Context | None = None) -> str:
     """Провести OSINT-расследование по задаче: подобрать источники, опросить их и
     вернуть готовое досье. Передай текст запроса пользователя (username, домен, IP,
     компанию/ИНН, хеш/URL или свободное описание)."""
@@ -1155,6 +1436,10 @@ async def investigate(task: str, ctx: Context | None = None) -> str:
     # референс-досье: юр. слой + сеть/поддомены/сертификаты по доменам компании).
     primary_company = next((t["value"] for t in plan["targets"]
                             if t["type"] == "company"), None)
+    if not primary_company and DOMAIN_DEEP and organization_research.requested(task):
+        primary_company = next((t['value'] for t in plan['targets'] if t['type'] == 'domain'), None)
+        if primary_company:
+            plan['targets'].append({'type': 'company', 'value': primary_company})
     identity: dict | None = None
     probe_results: list[dict] = []
     if primary_company and DOMAIN_DEEP:
@@ -1245,6 +1530,28 @@ async def investigate(task: str, ctx: Context | None = None) -> str:
     if primary_company and DOMAIN_DEEP:
         results += await enrich_officers(results, primary_company, identity)
         reclassify(results)
+    if primary_company and russia_links.requested(task):
+        await _progress(6.5, 10, "Проверяю связи с РФ, ЕГРЮЛ/ЕГРИП и публичную историю работы…")
+        focus_data = dossier.extract_company_data(results, identity)
+        args = {"company": (identity or {}).get("legal_name") or primary_company,
+                "tax_id": (identity or {}).get("inn") or "",
+                "people": russia_links.people_from_data(focus_data)}
+        focused = await run_one("directapi", {"type": "company", "value": primary_company},
+                                "russia_connections", args)
+        focused.update(tool="russia_connections", target_type="company",
+                       target_value=primary_company, phase="russia_connections")
+        results.append(focused)
+        reclassify(results)
+        import newdb
+        candidate_inns = [value for value in recipes.inn_values(task) if len(value) == 10]
+        checked = await newdb.collect(args["company"], identity, args["people"],
+                                      os.environ.get("NEWDB_MCP_TOKEN", ""), candidate_inns)
+        results.append({"server": "newdb", "name": "NewDB · целевые реестры РФ",
+                        "tool": "registry_focus", "phase": "russia_newdb",
+                        "target_type": "company", "target_value": primary_company,
+                        "ok": checked["status"] == "checked" and any(
+                            c["status"] == "complete" for c in checked["checks"]),
+                        "text": json.dumps(checked, ensure_ascii=False)})
     # Для домена: вторая волна reverse-RDAP по IP из пассивного DNS → таблица сетей/AS.
     primary_domain = next((t["value"] for t in plan["targets"]
                            if t["type"] == "domain"), None)
@@ -1265,6 +1572,76 @@ async def investigate(task: str, ctx: Context | None = None) -> str:
         reclassify(results)
         # Поддомены → IP (ref Table 19): резолвинг топ-N поддоменов.
         reclassify(results)
+    if CORPORATE_RESEARCH and DOMAIN_DEEP and (primary_company or primary_domain or any(
+            t["type"] == "inn" for t in plan["targets"])):
+        await _progress(7.5, 10, "Ищу юрлица в контактах, архивах и договорах; проверяю реестры…")
+        async def research_call(sid, tool, args):
+            result = await run_one(sid, {"type": "company", "value": primary_company or primary_domain or task}, tool, args)
+            reclassify([result])
+            return result
+        async def research_extract(pages):
+            answer = await llm([
+                {"role": "system", "content": corporate_research.EXTRACT_PROMPT},
+                {"role": "user", "content": json.dumps([
+                    {"url": p["url"], "text": p["text"][:14000]} for p in pages], ensure_ascii=False)}
+            ], max_tokens=2500, model=REPORT_MODEL)
+            return _json_from(answer or "") or {}
+        research_identity = identity
+        if not research_identity:
+            for r in results:
+                if r.get("ok") and r.get("server") == "checko" and r.get("tool") == "get_company":
+                    ck = dossier._checko_facts(r.get("text", ""))
+                    if ck and corporate_research.valid_inn(ck.get("inn")):
+                        research_identity = {"inn": ck["inn"], "legal_name": ck["name"], "jurisdiction": "RU"}
+                        break
+        research_task = asyncio.create_task(corporate_research.collect(
+            task, [t["value"] for t in plan["targets"] if t["type"] == "domain"],
+            research_identity, results, research_call, research_extract,
+            deadline=RESEARCH_DEADLINE, max_calls=RESEARCH_CALLS,
+            cache_dir=Path(REPORTS_DIR)/".corporate-cache"))
+        try:
+            while not research_task.done():
+                await asyncio.wait({research_task}, timeout=20)
+                if not research_task.done():
+                    await _progress(7.5, 10, "Проверяю архивные документы и реестровые связи…")
+            research_data = research_task.result()
+        except asyncio.CancelledError:
+            research_task.cancel()
+            await asyncio.gather(research_task, return_exceptions=True)
+            raise
+        except Exception as exc:
+            research_data = {"pages": [], "companies": [], "failures": [{
+                "tool": "corporate_research", "reason": type(exc).__name__}]}
+        results.append({"server": "orchestrator", "name": "Расширенная корпоративная проверка",
+                        "tool": "corporate_research", "phase": corporate_research.PHASE,
+                        "ok": bool(research_data.get("pages") or research_data.get("companies")),
+                        "text": json.dumps(research_data, ensure_ascii=False)})
+    if primary_company and DOMAIN_DEEP and organization_research.requested(task):
+        await _progress(7.8, 10, 'Читаю целевые источники о людях, договорах и иностранных связях…')
+        async def organization_call(sid, tool, args):
+            item = await run_one(sid, {'type': 'company', 'value': primary_company}, tool, args)
+            reclassify([item])
+            return item
+        async def organization_extract(pages):
+            return await extract_organization_facts(task, primary_company, pages)
+        focused = asyncio.create_task(organization_research.collect(
+            task, primary_company, [t['value'] for t in plan['targets'] if t['type'] == 'domain'],
+            results, organization_call, organization_extract, seed_urls=_RESEARCH_SOURCE_URLS.get()))
+        try:
+            while not focused.done():
+                await asyncio.wait({focused}, timeout=20)
+                if not focused.done():
+                    await _progress(7.8, 10, 'Проверяю документы и даты профессиональных связей…')
+            focused_data = focused.result()
+        except asyncio.CancelledError:
+            focused.cancel()
+            await asyncio.gather(focused, return_exceptions=True)
+            raise
+        except Exception as exc:
+            focused_data = {'pages': [], 'claims': [], 'failures': [{'reason': type(exc).__name__}]}
+        results.append({'server': 'orchestrator', 'name': 'Целевая проверка организации',
+                        'tool': organization_research.PHASE, 'phase': organization_research.PHASE,
+                        'ok': bool(focused_data.get('pages')), 'text': json.dumps(focused_data, ensure_ascii=False)})
     await _progress(8, 10, "Синтезирую аналитическое досье…")
     # Синтез. Компания → досье (корпоративный слой + инфраструктура доменов); домен →
     # глубокое досье; прочее → общий LLM-синтез. При сбое — None → отчёт строится
@@ -1281,6 +1658,13 @@ async def investigate(task: str, ctx: Context | None = None) -> str:
         synthesis = await build_ip_dossier(primary_ip, results)
     else:
         synthesis = await synthesize_dossier(task, plan["targets"], results)
+        if any(r.get("phase") == corporate_research.PHASE for r in results):
+            synthesis = (synthesis or "") + "\n\n" + "\n".join(
+                corporate_research.render(corporate_research.from_results(results)))
+    if (any(r.get("phase") == corporate_research.PHASE for r in results) and
+            "## Юридические лица: поиск по сайтам и архивам" not in (synthesis or "")):
+        synthesis = (synthesis or "") + "\n\n" + "\n".join(
+            corporate_research.render(corporate_research.from_results(results)))
     await _progress(9, 10, "Сохраняю отчёт…")
     # Полный структурированный отчёт → файлы .md/.pdf (синтез сверху + сырые данные
     # приложением). В чат возвращаем краткую сводку + ссылки на файлы.

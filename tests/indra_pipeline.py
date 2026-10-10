@@ -29,6 +29,8 @@ async def main():
     parser.add_argument('--refresh', action='store_true', help='Повторить неполные новые источники перед replay')
     parser.add_argument('--model', help='Модель маршрутизации только для этого прогона')
     parser.add_argument('--report-model', help='Модель синтеза только для этого прогона')
+    parser.add_argument('--research-source-urls', type=Path, help='JSON-список первичных URL для чтения системой')
+    parser.add_argument('--reextract-organization', action='store_true', help='Повторить извлечение фактов из сохранённых документов при replay')
     args = parser.parse_args()
     out = Path('/reports') / args.output_group / args.label
     out.mkdir(parents=True, exist_ok=True)
@@ -104,6 +106,16 @@ async def main():
     if args.replay:
         record = json.loads(args.replay.read_text())
         ident, results = record['identity'], record['results']
+        if args.reextract_organization:
+            import organization_research
+            for row in results:
+                if row.get('tool') == organization_research.PHASE:
+                    source = json.loads(row['text'])
+                    async def extract(pages):
+                        return await server.extract_organization_facts(record['task'], source['company'], pages)
+                    revised = await organization_research.reextract(source, extract)
+                    row['text'] = json.dumps(revised, ensure_ascii=False)
+                    row['ok'] = bool(revised.get('pages'))
         if args.refresh:
             selected = {}
             for r in results:
@@ -124,15 +136,11 @@ async def main():
             ident.get('legal_name') or ident.get('query') or record['task'], ident.get('domains', []), results, ident)
         from datetime import datetime, timezone
         when = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
-        provenance = (f"> **Повторная сборка отчёта:** использованы сохранённые ответы источников от {record['when']}. "
-                      "Источники целиком повторно не опрашивались.")
-        if args.supplement:
-            provenance += " Дополнительные ответы включены отдельно; происхождение сохранено в материалах проверки."
-        synthesis = provenance + "\n\n" + (synthesis or "")
         info = capture(record['task'], results, when, '', '', synthesis, ident)
         result = server.render_chat_summary(record['task'], results, info, ident)
     else:
-        result = await server.investigate(args.task, Progress())
+        source_urls = json.loads(args.research_source_urls.read_text()) if args.research_source_urls else None
+        result = await server.investigate(args.task, Progress(), source_urls=source_urls)
     (out / 'chat.md').write_text(result)
     print(result, flush=True)
     print(f'Elapsed: {time.monotonic() - started:.1f}s', flush=True)

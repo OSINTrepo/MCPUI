@@ -7,6 +7,7 @@ FROM ${BASE_IMAGE}
 # Изменение парсера не должно повторно скачивать все зависимости.
 COPY servers/directapi/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir --break-system-packages -r /app/requirements.txt
+COPY servers/common/ /app/common/
 COPY servers/directapi/ /app/
 
 # Запуск задаётся stdio_command в реестре (python /app/server.py); supergateway

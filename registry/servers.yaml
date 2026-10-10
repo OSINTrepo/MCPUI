@@ -38,7 +38,11 @@ servers:
       ORCHESTRATOR_PAID_SOURCES: "${ORCHESTRATOR_PAID_SOURCES:-0}"
       ORCHESTRATOR_RESOLVE_DEADLINE: "${ORCHESTRATOR_RESOLVE_DEADLINE:-45}"
       ORCHESTRATOR_ENTITY_RESOLVE: "${ORCHESTRATOR_ENTITY_RESOLVE:-1}"
+      ORCHESTRATOR_CORPORATE_RESEARCH: "${ORCHESTRATOR_CORPORATE_RESEARCH:-1}"
+      ORCHESTRATOR_RESEARCH_DEADLINE: "${ORCHESTRATOR_RESEARCH_DEADLINE:-240}"
+      ORCHESTRATOR_RESEARCH_CALLS: "${ORCHESTRATOR_RESEARCH_CALLS:-64}"
       ORCHESTRATOR_COMPANY_DOMAINS: "${ORCHESTRATOR_COMPANY_DOMAINS:-1}"
+      NEWDB_MCP_TOKEN: "${NEWDB_MCP_TOKEN:-}"
       LITELLM_BASE_URL: "http://litellm:4000/v1"
       # Модель подбора серверов и модель-писатель отчёта — из .env (по умолчанию
       # deepseek-flash, как в проверенных досье). Модели можно менять независимо.
@@ -232,7 +236,11 @@ servers:
       CENSYS_PAT: "${CENSYS_PAT:-}"
       CENSYS_ORG_ID: "${CENSYS_ORG_ID:-}"
       WHOISXML_API_KEY: "${WHOISXML_API_KEY:-}"
+      WHOIS_HISTORY_CACHE_DIR: "/cache/whois-history"
+      WHOIS_HISTORY_CACHE_TTL_SECONDS: "${WHOIS_HISTORY_CACHE_TTL_SECONDS:-86400}"
       OPENCORPORATES_API_KEY: "${OPENCORPORATES_API_KEY:-}"
+    volumes:
+      - ./data/whois-history-cache:/cache/whois-history
     auth:
       type: none
       user_var: null
@@ -311,6 +319,24 @@ servers:
     inputs: [company]
     repo: https://github.com/Stewyboy1990/companyscope-mcp
     enabled: false
+
+  - id: newdb
+    category: company
+    display_name: NewDB
+    description: "NewDB: ЕГРЮЛ/ЕГРИП и корпоративные проверки РФ. Для точного поиска нужен российский ИНН; ФИО даёт кандидатов."
+    key_help: "MCP-токен NewDB: https://newdb.net/mcp-server-newdb. Для авто-отчётов задайте NEWDB_MCP_TOKEN в .env."
+    transport: http
+    install: remote
+    url: https://api.newdb.net/mcp
+    auth:
+      type: api_key
+      user_var: NEWDB_MCP_TOKEN
+      header: Authorization
+      scheme: Bearer
+    cost_tier: paid
+    inputs: [company, inn]
+    repo: https://newdb.net/mcp-server-newdb
+    enabled: true
 
   - id: checko
     category: company
@@ -629,6 +655,10 @@ servers:
     stdio_command: python /app/server.py
     env:
       WHOXY_API_KEY: ${WHOXY_API_KEY:-}
+      WHOIS_HISTORY_CACHE_DIR: "/cache/whois-history"
+      WHOIS_HISTORY_CACHE_TTL_SECONDS: "${WHOIS_HISTORY_CACHE_TTL_SECONDS:-86400}"
+    volumes:
+      - ./data/whois-history-cache:/cache/whois-history
     auth:
       type: api_key
       user_var: WHOISXML_API_KEY

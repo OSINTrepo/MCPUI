@@ -240,12 +240,103 @@ def _shodan_assets(text: str) -> list[dict]:
 
 
 # --------------------------- извлечение структуры ---------------------------
+def _current_whois_data(record: dict) -> dict:
+    """Привести ответ WhoisXML к схеме RDAP без дат из исторических записей."""
+    def values(value):
+        if isinstance(value, list):
+            return value
+        return [value] if value else []
+
+    nameservers = record.get("nameservers") or record.get("nameServers") or []
+    if isinstance(nameservers, dict):
+        nameservers = nameservers.get("hostNames") or []
+    registrant = record.get("registrant")
+    if isinstance(registrant, dict):
+        registrant = registrant.get("organization") or registrant.get("name")
+    return {
+        "domain_name": record.get("domain_name") or record.get("domain"),
+        "registrar": record.get("registrar") or record.get("registrarName"),
+        "registration": record.get("registration") or record.get("createdDate"),
+        "expiration": record.get("expiration") or record.get("expiresDate"),
+        "last_changed": record.get("last_changed") or record.get("updatedDate"),
+        "status": values(record.get("status")),
+        "nameservers": values(nameservers),
+        "registrant": registrant,
+        "entities": record.get("entities") or ([{"roles": ["registrant"], "name": registrant}] if registrant else []),
+        "domainAvailability": record.get("domainAvailability"),
+        "dataError": record.get("dataError"),
+        "parseCode": record.get("parseCode"),
+    }
+
+
+def _history_domain_key(domain) -> str:
+    """Сопоставить Unicode-имя с ASCII/IDNA-именем ответа провайдера."""
+    value = str(domain or "").strip().rstrip(".")
+    try:
+        return value.encode("idna").decode("ascii").lower().rstrip(".")
+    except UnicodeError:
+        return value.lower()
+
+
+def whois_history_facts(data: dict, limit: int = 24) -> dict | None:
+    """Компактные группы наблюдений, сохраняющие старые и новые регистранты."""
+    records = [r for r in (data.get("whois_history") or []) if isinstance(r, dict)]
+    if not records:
+        return None
+    groups: dict = {}
+    all_dates = []
+    for record in records:
+        audit = record.get("audit") if isinstance(record.get("audit"), dict) else {}
+        observed = audit.get("createdDate") or audit.get("updatedDate") or record.get("observedDate")
+        fields = {
+            "registrar": record.get("registrarName"),
+            "registrant": record.get("registrant"),
+            "registrant_name": record.get("registrantName"),
+            "registrant_organization": record.get("registrantOrganization"),
+            "domain_created": record.get("createdDate") or record.get("createdDateNormalized"),
+            "provider_event_type": record.get("domainType"),
+        }
+        if not observed and not any(fields.values()):
+            continue
+        key = json.dumps(fields, ensure_ascii=False, sort_keys=True, default=str)
+        group = groups.setdefault(key, {**fields, "record_count": 0, "_dates": set(), "_expires": set()})
+        group["record_count"] += 1
+        if observed:
+            group["_dates"].add(str(observed))
+            all_dates.append(str(observed))
+        if record.get("expiresDate"):
+            group["_expires"].add(str(record["expiresDate"]))
+    observations = []
+    for group in groups.values():
+        dates = sorted(group.pop("_dates"))
+        expirations = sorted(group.pop("_expires"))
+        observations.append({**group, "first_observed": dates[0] if dates else None,
+                             "last_observed": dates[-1] if dates else None,
+                             "expiry_first": expirations[0] if expirations else None,
+                             "expiry_last": expirations[-1] if expirations else None})
+    observations.sort(key=lambda group: (str(group["first_observed"] or "~"), str(group["registrant"] or "")))
+    total = len(observations)
+    limit = max(1, limit)
+    if total > limit:
+        first_count = (limit + 1) // 2
+        last_count = limit - first_count
+        observations = observations[:first_count] + (observations[-last_count:] if last_count else [])
+    return {
+        "records_count": len(records), "groups_count": total,
+        "first_snapshot": min(all_dates) if all_dates else None,
+        "last_snapshot": max(all_dates) if all_dates else None,
+        "observations": observations, "omitted_groups": max(0, total - len(observations)),
+        "sources": data.get("whois_history_sources") or [],
+        "scope": "Исторические наблюдения WHOIS. Первая/последняя дата — даты зафиксированных снимков, а не непрерывный период владения. cache.fetched_at — дата получения истории у источника; response_returned_at — время ответа инструмента, которое при cache.status=hit не означает новый запрос источника. Регистрант и контактное имя не подтверждают личность человека, гражданство, текущее владение или конкретное юридическое лицо. Тип события — классификация провайдера; dropped не означает ликвидацию компании.",
+    }
+
+
 def extract_domain_data(results: list[dict]) -> dict:
     """Свести ответы всех источников в структурированное досье (без выдумывания)."""
     d: dict = {"whois": None, "dns": None, "mail": {}, "ips": {}, "certs": [],
                "subdomains": set(), "files": [], "reputation": None,
                "gleif": None, "ip_info": {}, "shodan_assets": [],
-               "whois_history": [], "webpages": [], "web_inspect": None,
+               "whois_history": [], "whois_history_sources": [], "webpages": [], "web_inspect": None,
                "cse": [], "asn_by_ip": {}, "cohost": {}, "subdomain_ips": {},
                "subdomain_src": {}, "_sources": {}}
 
@@ -268,7 +359,49 @@ def extract_domain_data(results: list[dict]) -> dict:
         if label not in d["_sources"][cat]:
             d["_sources"][cat].append(label)
 
+    history_payloads_seen, history_sources_seen = set(), set()
+
+    def history(r: dict, payload: dict) -> None:
+        """Сохранить историю и дату исходного запроса независимо от выдачи кэша."""
+        requested = (r.get("args") or {}).get("domain") or (
+            r.get("target_value") if r.get("target_type") == "domain" else None)
+        domain = payload.get("domain") or requested
+        if requested and domain and _history_domain_key(requested) != _history_domain_key(domain):
+            return  # Чужой ответ не становится доказательством по запрошенному домену.
+        records = payload.get("records") or []
+        cache = payload.get("cache") if isinstance(payload.get("cache"), dict) else {}
+        source = {
+            "server": r.get("server"), "tool": "whois_history", "domain": domain,
+            "provider": payload.get("source") or r.get("server"),
+            "records_count": len(records) if isinstance(records, list) else 0,
+            "cache": {key: cache[key] for key in ("status", "fetched_at", "expires_at", "age_seconds", "ttl_seconds")
+                      if key in cache},
+        }
+        source_key = json.dumps(source, sort_keys=True, ensure_ascii=False, default=str)
+        if source_key not in history_sources_seen:
+            history_sources_seen.add(source_key)
+            source["response_returned_at"] = r.get("retrieved_at")
+            d["whois_history_sources"].append(source)
+        if not r.get("ok") or payload.get("error") or not isinstance(records, list):
+            return
+        if records:
+            prov("whois_history", r, "whois_history (" + str(source["provider"]) + ")")
+        # Оба MCP-алиаса могут вернуть одну купленную историю. Повторный набор
+        # не удваиваем, но сохраняем все записи первого ответа, включая
+        # одинаковые после нормализации: «получено» должно совпадать с API.
+        payload_key = json.dumps({"domain": _history_domain_key(domain),
+                                  "provider": source["provider"], "records": records},
+                                 sort_keys=True, ensure_ascii=False, default=str)
+        if payload_key not in history_payloads_seen:
+            history_payloads_seen.add(payload_key)
+            d["whois_history"].extend(record for record in records if isinstance(record, dict))
+
     for r in results:
+        if r.get("server") in ("directapi", "whoisxml") and r.get("tool") == "whois_history":
+            payload = _load_json(r.get("text") or "")
+            if isinstance(payload, dict):
+                history(r, payload)
+            continue
         if not r.get("ok"):
             continue
         sid = r.get("server")
@@ -312,10 +445,6 @@ def extract_domain_data(results: list[dict]) -> dict:
                     _sub(s, src)
             elif tool == "gleif_entity" and not j.get("error"):
                 d["gleif"] = j; prov("org", r, "gleif_entity")
-            elif tool == "whois_history" and not j.get("error"):
-                if j.get("records"):
-                    prov("whois_history", r, "whois_history (" + str(j.get("source", "")) + ")")
-                d["whois_history"].extend(j.get("records") or [])
             elif tool == "web_inspect" and not j.get("error"):
                 d["web_inspect"] = j
                 prov("web_inspect", r, "web_inspect")
@@ -523,16 +652,10 @@ def extract_domain_data(results: list[dict]) -> dict:
             j = _load_json(text)
             if not isinstance(j, dict):
                 continue
-            if tool == "whois_history":
-                for rec in (j.get("records") or []):
-                    d["whois_history"].append(rec)
-                if j.get("records"):
-                    prov("whois_history", r,
-                         "whois_history (" + str(j.get("source", "whoisxml")) + ")")
-            elif tool == "whois_current":
+            if tool == "whois_current":
                 # Используем как фолбэк, если rdap_domain не ответил
-                if not d["whois"] and not j.get("error") and j.get("domain_name"):
-                    d["whois"] = j
+                if not d["whois"] and not j.get("error") and (j.get("domain_name") or j.get("domain")):
+                    d["whois"] = _current_whois_data(j)
                     prov("whois", r, "whois_current")
         # Googlesearch — тематический веб-поиск (домены: новости/утечки/соцсети)
         elif sid == "googlesearch":
@@ -823,7 +946,7 @@ def _cse_terms(identity: dict | None, target: str = "") -> dict:
     # Название из нескольких значащих слов ⇒ голый бренд НЕ идентифицирует цель.
     name_toks = E._tokens(ident.get("legal_name") or "")
     return {"domains": domains, "phrases": phrases, "tickers": tickers,
-            "brand": brand, "ambiguous": len(name_toks) > 1}
+            "brand": brand, "ambiguous": len(name_toks) > 1 or (bool(domains) and not ident.get("legal_name"))}
 
 
 def _cse_relevant(item: dict, terms: dict) -> bool:
@@ -842,7 +965,8 @@ def _cse_relevant(item: dict, terms: dict) -> bool:
     if not (terms["domains"] or terms["phrases"] or terms["brand"]):
         return True
     # 1) различающие признаки — принимаем сразу
-    if any(d in hay for d in terms["domains"]):
+    if any(re.search(r'(?<![\w.-])' + re.escape(d) + r'(?![\w.-])', hay)
+           for d in terms["domains"]):
         return True
     if any(p in hay for p in terms["phrases"]):
         return True
@@ -989,16 +1113,56 @@ def _webrefs_section(domain: str, data: dict) -> list[str]:
     return md + [""]
 
 
-def _cert_active(valid_until: str | None) -> bool:
-    """True, если срок действия сертификата не истёк (best-effort по дате в тексте).
-    Неизвестная/непарсируемая дата → считаем активным (не прячем данные)."""
-    if not valid_until:
-        return True
-    m = re.search(r"(20\d{2})", valid_until)
-    if not m:
-        return True
+def _cert_date(value):
+    """UTC-время либо календарная дата; один год не позволяет определить статус."""
     from datetime import datetime, timezone
-    return int(m.group(1)) >= datetime.now(timezone.utc).year
+    value = str(value or "").strip()
+    try:
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}.*", value):
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+        for fmt in ("%m/%d/%Y", "%m/%d/%Y, %I:%M:%S %p", "%b %d %H:%M:%S %Y GMT"):
+            try:
+                return datetime.strptime(value, fmt).replace(tzinfo=timezone.utc)
+            except ValueError:
+                pass
+    except ValueError:
+        pass
+    return None
+
+
+def cert_status(cert: dict, now=None) -> str:
+    from datetime import datetime, timezone
+    now = now or datetime.now(timezone.utc)
+    end = _cert_date(cert.get("valid_until"))
+    start = _cert_date(cert.get("valid_from"))
+    if end is None:
+        return "unknown"
+    # При отсутствии времени сравниваем календарные даты, не выдумываем час.
+    date_only = bool(re.fullmatch(r"(?:\d{1,2}/\d{1,2}/\d{4}|\d{4}-\d{2}-\d{2})",
+                                  str(cert.get("valid_until") or "")))
+    if (end.date() < now.date()) if date_only else (end <= now):
+        return "expired"
+    if start and start > now:
+        return "future"
+    return "active"
+
+
+def _cert_active(valid_until: str | None) -> bool:
+    return cert_status({"valid_until": valid_until}) == "active"
+
+
+def unique_certs(data: dict) -> list[dict]:
+    out = {}
+    for c in data.get("certs") or []:
+        out.setdefault((c.get("subject"), c.get("issuer"), c.get("valid_until")), c)
+    return list(out.values())
+
+
+def domain_subdomains(domain: str, data: dict) -> list[str]:
+    domain = domain.lower().rstrip(".")
+    return sorted({s.lower().rstrip(".") for s in data.get("subdomains", set())
+                   if s.lower().rstrip(".").endswith("." + domain)})
 
 
 def _ranges_section(ip_info: dict) -> list[str]:
@@ -1024,7 +1188,7 @@ def _ranges_section(ip_info: dict) -> list[str]:
 
 def data_for_llm(domain: str, data: dict) -> dict:
     """Компактная структура для LLM (для резюме/выводов) — без «сырья»."""
-    subs = sorted(s for s in data.get("subdomains", set()) if s.endswith(domain))
+    subs = domain_subdomains(domain, data)
     groups: dict[str, int] = {}
     for s in subs:
         groups[classify_subdomain(s)] = groups.get(classify_subdomain(s), 0) + 1
@@ -1035,11 +1199,15 @@ def data_for_llm(domain: str, data: dict) -> dict:
                          "reg_no": g.get("registration_number"), "status": g.get("entity_status")}
         if g.get("legal_name") else None,
         "whois": data.get("whois"),
+        "whois_history": whois_history_facts(data),
         "mail": data.get("mail"),
         "ip_count": len(data.get("ips") or {}),
         "ips": list((data.get("ips") or {}).keys())[:15],
         "ip_networks": [ (v.get("name") or v.get("organization")) for v in (data.get("ip_info") or {}).values() ],
-        "cert_count": len(data.get("certs") or []),
+        "dns": data.get("dns"),
+        "cert_count": len(unique_certs(data)),
+        "cert_status_counts": {state: sum(cert_status(c) == state for c in unique_certs(data))
+                               for state in ("active", "expired", "future", "unknown")},
         "subdomain_count": len(subs),
         "subdomain_groups": groups,
         "reputation": data.get("reputation"),
@@ -1143,8 +1311,9 @@ def _checko_financials(text: str, identity: dict | None) -> dict | None:
     for code, label in (("2110", "Выручка"), ("2400", "Чистая прибыль (убыток)"),
                         ("1600", "Активы"), ("1300", "Капитал и резервы"),
                         ("1400", "Долгосрочные обязательства"), ("1500", "Краткосрочные обязательства")):
-        series = {y: records[y][code] for y in years
-                  if type(records[y].get(code)) in (int, float)}
+        values = {y: records[y].get(code) for y in years}
+        values = {y: v.get("СумОтч") if isinstance(v, dict) else v for y, v in values.items()}
+        series = {y: v for y, v in values.items() if type(v) in (int, float)}
         if series:
             metrics[label] = series
     if not metrics:
@@ -1186,11 +1355,37 @@ def extract_company_data(results: list[dict], identity: dict | None = None) -> d
                "aleph": None, "stock_quote": None, "ticker_candidates": [],
                "cif": None, "_sources": {}}
     for r in results:
+        if r.get('tool') == 'fi_company_records':
+            j = _load_json(r.get('text', ''))
+            if isinstance(j, dict):
+                d['fi_registry'] = j
+            continue
+        if r.get('tool') == 'organization_research':
+            j = _load_json(r.get('text', ''))
+            if isinstance(j, dict):
+                d['organization_research'] = j
+            continue
+        if r.get("phase") == "russia_newdb":
+            j = _load_json(r.get("text", ""))
+            if isinstance(j, dict): d["russia_newdb"] = j
+            continue
+        if r.get("tool") == "russia_connections":
+            j = _load_json(r.get("text", "")) if r.get("ok") else None
+            d["russia_connections"] = j if isinstance(j, dict) and j.get("company") else {"unavailable": True}
+            continue
         if not r.get("ok"):
             continue
         sid, tool, text = r.get("server"), r.get("tool", ""), r.get("text", "") or ""
         # Базовое имя источника: метка шага уже содержит «· инструмент».
         nm = (r.get("name") or sid or "?").split(" · ")[0]
+        if sid == "directapi" and tool == "uz_company_records":
+            j = _load_json(text)
+            if (isinstance(j, dict) and j.get("matched") and identity
+                    and identity.get("jurisdiction") == "UZ"
+                    and identity.get("inn") == j.get("tax_id")):
+                d["uz_directory"] = j
+                d["_sources"]["c_uz"] = [rec["source_url"] for rec in j.get("records", [])]
+            continue
         # Вызовы фазы 0 сделаны РАЗГОВОРНОЙ строкой запроса и служили только для
         # выбора кандидата. Их карточка не должна становиться утверждённым
         # юрлицом — иначе отвергнутый кандидат (датская META) вернулся бы сюда.
@@ -1359,6 +1554,16 @@ def company_data_for_llm(name: str, data: dict, infra: list[dict],
     ident = identity or {}
     return {
         "company": name,
+        "organization_research": __import__('organization_research').facts_for_llm(data['organization_research'])
+            if data.get('organization_research') else None,
+        "fi_registry": {key: value for key, value in (data.get('fi_registry') or {}).items()
+                        if key not in ('records', 'addresses', 'registered_entries')},
+        "russia_connections": ({
+            "relations": (data.get("russia_connections") or {}).get("relations", []),
+            "citizenship": "not_established",
+            "scope": "Сообщения источников требуют независимой проверки; отсутствие связей не установлено",
+            "unavailable": (data.get("russia_connections") or {}).get("unavailable", False),
+        } if data.get("russia_connections") else None),
         "official_claims": (data.get("official") or {}).get("claims", []),
         "official_metrics": (data.get("official") or {}).get("metrics", []),
         "official_business": (data.get("official") or {}).get("businesses", []),
@@ -1384,11 +1589,20 @@ def company_data_for_llm(name: str, data: dict, infra: list[dict],
                 "sic": sec.get("sic_description"), "address": sec.get("address"),
                 "filings_count": len(sec.get("recent_filings") or [])} if sec else None,
         "checko": ck or None,
+        "uz_directory": {k: v for k, v in (data.get("uz_directory") or {}).items()
+                         if k not in ("records", "evidence_text")},
+        "directory_sources": [{"name": r.get("source_url", "").split("/")[2],
+                               "url": r.get("source_url"), "source_dates": r.get("source_dates"),
+                               "retrieved_at": r.get("retrieved_at")}
+                              for r in (data.get("uz_directory") or {}).get("records", [])],
+        "web_search": [{"engine": c.get("engine"), "results": c.get("results", [])[:10]}
+                       for c in data.get("cse") or []],
         "wikipedia": (data.get("wikipedia") or {}).get("extract"),
         "companyscope": data.get("companyscope"),
         "financials": data.get("financials"),
         "opencorporates_officers_count": off.get("officers_count"),
         "registry_director": ck.get("director"),
+        "directory_director": (data.get("uz_directory") or {}).get("director"),
         "officers_sample": [o.get("name") for o in (off.get("officers") or [])[:8]],
         "borme": {
             "name": borme.get("name"), "nif": borme.get("nif"),

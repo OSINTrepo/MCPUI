@@ -25,9 +25,14 @@ import asyncio
 import json
 import os
 import re
+import sys
+from pathlib import Path
 
 import httpx
 from mcp.server.fastmcp import FastMCP
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from common.whois_history_cache import canonical_domain, get_history
 
 mcp = FastMCP("directapi")
 
@@ -554,42 +559,114 @@ async def censys_domain(domain: str) -> str:
 
 
 # ------------------------- WHOIS History (WhoisXML → Whoxy) ----------------
-async def _wx_whoisxml(domain: str) -> tuple[list | None, str | None]:
+def _whois_provider_failure(provider: str, data: object = None,
+                            transport_error: str | None = None) -> dict | None:
+    """Типизированный отказ WHOIS без сообщения, способного содержать ключ."""
+    body = data if isinstance(data, dict) else {}
+    detail = body.get("ErrorMessage") or body.get("error")
+    if isinstance(detail, dict):
+        code = detail.get("errorCode") or detail.get("code")
+        message = detail.get("message") or detail.get("messages") or detail
+    else:
+        code = body.get("code")
+        message = detail or body.get("messages") or body.get("message")
+    failed_code = code not in (None, 0, "0", 200, "200")
+    if not transport_error and not detail and not failed_code:
+        return None
+    http_code = re.search(r"HTTP (\d{3})", transport_error or "")
+    status = int(http_code.group(1)) if http_code else None
+    if status is None and str(code).isdigit():
+        numeric = int(code)
+        status = numeric if 400 <= numeric <= 599 else None
+    low = f"{code} {message}".lower()
+    # HTTP 403 сам по себе не различает баланс, ключ и IP allowlist.
+    if status == 403:
+        kind, note = "access_denied", "HTTP 403: доступ ограничен; проверьте баланс продукта, ключ и IP allowlist"
+    elif status == 402:
+        kind, note = "quota_exhausted", "HTTP 402: требуется оплата или пополнение кредитов продукта"
+    elif status == 401:
+        kind, note = "authentication_failed", "HTTP 401: ключ не принят провайдером"
+    elif status == 429:
+        kind, note = "rate_limited", "HTTP 429: лимит запросов исчерпан"
+    elif any(x in low for x in ("insufficient credit", "not enough credit", "no balance", "quota", "credit limit", "balance limit")):
+        kind, note = "quota_exhausted", "кредиты или квота продукта исчерпаны"
+    elif any(x in low for x in ("authentication", "invalid api key", "incorrect api key", "invalidapikey", "invalid_api_key", "unauthorized")):
+        kind, note = "authentication_failed", "ключ не принят провайдером"
+    elif transport_error:
+        kind, note = "provider_unavailable", "провайдер недоступен"
+    else:
+        kind, note = "provider_error", "провайдер вернул ошибку"
+    result = {"provider": provider, "error_type": kind, "error": f"{provider}: {note}"}
+    safe_code = str(code) if code is not None else ""
+    if re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", safe_code) and safe_code not in (WHOISXML_KEY, WHOXY_KEY):
+        result["provider_code"] = safe_code
+    if status is not None:
+        result["http_status"] = status
+    return result
+
+
+def normalize_history_records(records: list) -> list[dict]:
+    """Сохраняем весь оплаченный набор истории и даты наблюдения провайдером."""
+    out = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        contact = record.get("registrantContact")
+        if not isinstance(contact, dict):
+            contact = record.get("registrant")
+        if not isinstance(contact, dict):
+            contact = {}
+        audit = record.get("audit") if isinstance(record.get("audit"), dict) else {}
+        out.append({
+            "domainName": record.get("domainName"),
+            "domainType": record.get("domainType"),
+            "createdDate": record.get("createdDateISO8601") or record.get("createdDateNormalized") or record.get("createdDateRaw") or record.get("createdDate"),
+            "updatedDate": record.get("updatedDateISO8601") or record.get("updatedDateNormalized") or record.get("updatedDateRaw") or record.get("updatedDate"),
+            "expiresDate": record.get("expiresDateISO8601") or record.get("expiresDateNormalized") or record.get("expiresDateRaw") or record.get("expiresDate"),
+            "registrarName": record.get("registrarName"),
+            "registrant": contact.get("organization") or contact.get("name") or (record.get("registrant") if isinstance(record.get("registrant"), str) else None),
+            "registrantName": contact.get("name"),
+            "registrantOrganization": contact.get("organization"),
+            "audit": {"createdDate": audit.get("createdDate"), "updatedDate": audit.get("updatedDate")},
+            "nameServers": record.get("nameServers") or [],
+            "status": record.get("status") or [],
+        })
+    return out
+
+
+async def _wx_whoisxml(domain: str) -> tuple[list | None, dict | None]:
     """WhoisXML WHOIS History. Возвращает (records|None, причина-недоступности)."""
     if not WHOISXML_KEY:
-        return None, "нет ключа WHOISXML_API_KEY"
+        return None, {"provider": "WhoisXML", "error_type": "missing_key", "error": "нет ключа WHOISXML_API_KEY"}
     data, err = await _get_json("https://whois-history.whoisxmlapi.com/api/v1",
                                 params={"apiKey": WHOISXML_KEY, "domainName": domain,
-                                        "mode": "purchase"}, timeout=25.0)
-    if err:
-        # 402/429/403 = кончились кредиты/лимит/невалидный ключ → это повод для фолбэка
-        return None, f"WhoisXML недоступен ({err})"
-    if isinstance(data, dict) and data.get("code") and data.get("messages"):
-        return None, f"WhoisXML: {str(data.get('messages'))[:80]}"  # напр. «no balance»
-    recs = (data or {}).get("records", []) if isinstance(data, dict) else []
-    out = [{
-        "createdDate": r.get("createdDateISO8601") or r.get("createdDateNormalized") or r.get("createdDateRaw"),
-        "updatedDate": r.get("updatedDateISO8601") or r.get("updatedDateNormalized") or r.get("updatedDateRaw"),
-        "expiresDate": r.get("expiresDateISO8601") or r.get("expiresDateNormalized") or r.get("expiresDateRaw"),
-        "registrarName": r.get("registrarName"),
-        "registrant": (r.get("registrantContact") or r.get("registrant") or {}).get("organization")
-        or (r.get("registrantContact") or r.get("registrant") or {}).get("name"),
-    } for r in recs[:15]]
+                                        "mode": "purchase"}, timeout=25.0, retries=0)
+    failure = _whois_provider_failure("WhoisXML", data, err)
+    if failure:
+        return None, failure
+    if not isinstance(data, dict) or not isinstance(data.get("records"), list):
+        return None, {"provider": "WhoisXML", "error_type": "invalid_response", "error": "WhoisXML: ответ истории WHOIS не содержит список records"}
+    out = normalize_history_records(data["records"])
+    if len(out) != len(data["records"]) or (type(data.get("recordsCount")) is int and data["recordsCount"] != len(out)):
+        return None, {"provider": "WhoisXML", "error_type": "invalid_response", "error": "WhoisXML: неполный или некорректный набор истории WHOIS"}
     return out, None
 
 
-async def _wx_whoxy(domain: str) -> tuple[list | None, str | None]:
+async def _wx_whoxy(domain: str) -> tuple[list | None, dict | None]:
     """Whoxy WHOIS History (резерв). Нормализует к тем же полям, что и WhoisXML."""
     if not WHOXY_KEY:
-        return None, "нет ключа WHOXY_API_KEY"
+        return None, {"provider": "Whoxy", "error_type": "missing_key", "error": "нет ключа WHOXY_API_KEY"}
     data, err = await _get_json("https://api.whoxy.com/",
-                                params={"key": WHOXY_KEY, "history": domain}, timeout=25.0)
+                                params={"key": WHOXY_KEY, "history": domain}, timeout=25.0, retries=0)
     if err:
-        return None, f"Whoxy недоступен ({err})"
+        return None, _whois_provider_failure("Whoxy", data, err)
     if not isinstance(data, dict) or data.get("status") == 0:
-        return None, f"Whoxy: {str((data or {}).get('status_reason', 'ошибка'))[:80]}"
+        reason = data.get("status_reason", "ошибка") if isinstance(data, dict) else "ошибка"
+        return None, _whois_provider_failure("Whoxy", {"error": reason})
     out = []
-    for r in (data.get("whois_records") or [])[:15]:
+    for r in (data.get("whois_records") or []):
+        if not isinstance(r, dict):
+            continue
         reg = r.get("registrant_contact") or {}
         out.append({
             "createdDate": r.get("create_date"),
@@ -602,24 +679,37 @@ async def _wx_whoxy(domain: str) -> tuple[list | None, str | None]:
 
 
 @mcp.tool()
-async def whois_history(domain: str) -> str:
-    """История регистрации домена (прошлые владельцы/регистраторы/даты). Пробует
+async def whois_history(domain: str, force_refresh: bool = False) -> str:
+    """История регистрации домена (записанные регистранты/регистраторы/даты). Пробует
     WhoisXML, при недоступности/исчерпании кредитов — резервный Whoxy. Если оба
-    недоступны, честно сообщает об этом (сбор не ломается). Передай домен."""
-    domain = (domain or "").strip().lower().split("/")[0]
-    if not domain:
-        return json.dumps({"error": "no domain"}, ensure_ascii=False)
+    недоступны, честно сообщает об этом (сбор не ломается). Общий кэш хранит полный
+    набор до суток. force_refresh=True принудительно повторяет платный запрос."""
+    try:
+        domain = canonical_domain(domain)
+    except ValueError:
+        return json.dumps({"error": "укажите корректный домен", "error_type": "invalid_input"}, ensure_ascii=False)
+    if not WHOISXML_KEY and not WHOXY_KEY:
+        return json.dumps({"error": "нужен ключ истории WHOIS (WhoisXML или Whoxy)", "error_type": "missing_key", "domain": domain}, ensure_ascii=False)
     reasons = []
     for provider, fn in (("WhoisXML", _wx_whoisxml), ("Whoxy", _wx_whoxy)):
-        recs, why = await fn(domain)
-        if recs is not None:
-            return json.dumps({"domain": domain, "source": provider,
-                               "records_count": len(recs), "records": recs},
-                              ensure_ascii=False)
-        if why:
-            reasons.append(why)
-    return json.dumps({"error": "нужен ключ истории WHOIS (WhoisXML или Whoxy)",
-                       "detail": "; ".join(reasons), "domain": domain},
+        # Не выдаём отсутствие резервного ключа за причину отказа основного API.
+        if (provider == "WhoisXML" and not WHOISXML_KEY) or (provider == "Whoxy" and not WHOXY_KEY):
+            continue
+        async def fetch():
+            recs, why = await fn(domain)
+            if recs is None:
+                return {"error": (why or {}).get("error", "история WHOIS недоступна"),
+                        "provider_errors": [why] if why else [], "domain": domain}
+            return {"domain": domain, "source": provider, "records_count": len(recs), "records": recs}
+
+        result = await get_history(domain, provider,
+                                   WHOISXML_KEY if provider == "WhoisXML" else WHOXY_KEY,
+                                   fetch, force_refresh=force_refresh)
+        if "records" in result and not result.get("error"):
+            return json.dumps(result, ensure_ascii=False)
+        reasons.extend(result.get("provider_errors") or [])
+    return json.dumps({"error": "история WHOIS недоступна: " + "; ".join(r["error"] for r in reasons),
+                       "provider_errors": reasons, "domain": domain},
                       ensure_ascii=False)
 
 
@@ -1312,6 +1402,31 @@ async def google_cse_engines() -> str:
     }, ensure_ascii=False)
 
 
+@mcp.tool()
+async def russia_connections(company: str, tax_id: str = "", people: list[dict] | None = None) -> str:
+    """Публичные связи компании с РФ: контрагенты, ЕГРЮЛ/ЕГРИП, LinkedIn.
+    ФИО — только из корпоративных источников. Гражданство по имени не определяется."""
+    import connections
+    return json.dumps(await connections.collect(company, tax_id, people or [], google_cse), ensure_ascii=False)
+
+
+@mcp.tool()
+async def uz_company_records(query: str, tax_id: str = "") -> str:
+    """Публичные карточки Узбекистана по имени или 9-значному ИНН/STIR.
+    Сохраняет даты и расхождения; не является официальной выпиской."""
+    import uzbekistan
+    return json.dumps(await uzbekistan.collect(query, google_cse, tax_id), ensure_ascii=False)
+
+
+@mcp.tool()
+async def fi_company_records(query: str, business_id: str = "") -> str:
+    """Официальный открытый PRH/YTJ v3: компании Торгового реестра Финляндии.
+    По точному имени или Y-tunnus. Объединения ry/rf требуют отдельного реестра;
+    пустой ответ не подтверждает их отсутствие. Без ключа и платных выписок."""
+    import finland
+    return json.dumps(await finland.collect(query, business_id), ensure_ascii=False)
+
+
 async def _serper_search(q: str, num: int = 10) -> tuple[dict | None, str | None]:
     try:
         async with httpx.AsyncClient(timeout=25.0) as c:
@@ -1540,6 +1655,14 @@ async def corporate_website(domain: str, query: str = "") -> str:
     руководство и публикации. URL и время чтения сохраняются для каждой страницы."""
     import corporate
     return json.dumps(await corporate.collect(domain, query, google_cse), ensure_ascii=False)
+
+
+@mcp.tool()
+async def public_document(url: str) -> str:
+    """Прочитать публичный HTML/PDF: текст, конечный URL, дата и SHA-256.
+    До 5 MB / 30 страниц PDF; закрытые ресурсы и CAPTCHA не обходятся."""
+    import documents
+    return json.dumps(await documents.collect(url), ensure_ascii=False)
 
 
 if __name__ == "__main__":

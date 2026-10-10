@@ -44,9 +44,9 @@ class Provider(BaseHTTPRequestHandler):
 
 async def main():
     config = yaml.safe_load(Path(sys.argv[1]).read_text())
-    names = {'qwen-osint-fast', 'qwen-osint-report', 'deepseek-flash', 'qwen-plan-report'}
+    names = {'qwen-osint-fast', 'qwen-osint-report', 'deepseek-flash', 'qwen-plan-report', 'qwen3-8b-api'}
     models = [copy.deepcopy(m) for m in config['model_list'] if m['model_name'] in names]
-    assert len(models) == 4
+    assert len(models) == len(names)
     stub = ThreadingHTTPServer(('127.0.0.1', 0), Provider)
     thread = threading.Thread(target=stub.serve_forever, daemon=True)
     thread.start()
@@ -70,7 +70,7 @@ async def main():
                 assert data['model'] == expected
                 assert data['max_tokens'] == 300
                 assert 'extra_body' not in data
-                if alias.startswith('qwen-'):
+                if alias.startswith('qwen'):
                     assert data['enable_thinking'] is False
                 else:
                     assert data['thinking'] == {'type': 'disabled'}

@@ -2,3 +2,4 @@ mcp==1.15.0
 httpx>=0.27
 markdown>=3.5
 weasyprint>=60
+pypdf>=5,<7

@@ -1,0 +1,8 @@
+# Облачные модели через API: применять после базового и MCP Compose.
+# Ollama остаётся выключенной (не активируйте профиль local-llm).
+# GigaChat нужен только при явном включении профиля cloud-gigachat.
+services:
+  gigachat-proxy:
+    profiles: ["cloud-gigachat"]
+  litellm:
+    depends_on: !reset []

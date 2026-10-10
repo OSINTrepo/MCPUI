@@ -60,6 +60,23 @@ class CountryTests(unittest.TestCase):
         current = {'legal_name': 'Example Corp', 'jurisdiction': 'US-WA', 'cik': '0000000001'}
         self.assertEqual(entity.refresh_identity(current, 'Example Corporation', [sec], []), current)
 
+    def test_supplied_uk_llp_number_becomes_an_unconfirmed_opencorporates_candidate(self):
+        task = 'Boston Brokerage Group, Russia links; candidate UK LLP OC401309'
+        specs = entity.probe_specs('Boston Brokerage Group', task)
+        self.assertIn(('directapi', 'opencorporates_search', {'query': 'OC401309'}), specs)
+        row = {'server': 'directapi', 'tool': 'opencorporates_search', 'ok': True,
+               'text': json.dumps({'query': 'OC401309', 'matches': [{
+                   'name': 'Boston Brokerage Group LLP', 'company_number': 'OC401309',
+                   'jurisdiction': 'gb', 'status': 'Dissolved', 'inactive': True,
+                   'url': 'https://opencorporates.com/companies/gb/OC401309'}]})}
+        probes = entity.parse_probes([row])
+        ident = entity.resolve('Boston Brokerage Group', probes)
+        self.assertIsNone(ident['legal_name'])
+        match = next(c for c in ident['candidates'] if c.get('registration_number') == 'OC401309')
+        self.assertEqual(match['jurisdiction'], 'gb')
+        self.assertIn('opencorporates', match['origins'])
+        self.assertIn('Dissolved', ';'.join(match['why']))
+
     def test_russian_name_is_not_split_into_fake_pao_company(self):
         targets = recipes.detect_targets('компания ПАО «Магнит», ИНН 2309085638, сайт magnit.com')
         self.assertEqual(len([t for t in targets if t['type'] == 'company']), 1)

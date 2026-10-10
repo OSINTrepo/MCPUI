@@ -45,6 +45,22 @@ class CorporateTests(unittest.TestCase):
         self.assertEqual(p['people'][0]['appointed'], '10-04-2025')
         self.assertEqual(corporate.parse_page(html, 'https://example.org/news', 'overview')['people'], [])
 
+    def test_association_business_details_in_footer_are_not_discarded(self):
+        page = corporate.parse_page('<main><h1>Example media association</h1><p>Culture.</p></main>'
+                                    '<footer>Example.fi rf<br>Y-tunnus 1234567-1<br>office@example.fi</footer>',
+                                    'https://example.fi/', 'overview')
+        self.assertIn('Example.fi rf', page['text'])
+        self.assertIn('Y-tunnus 1234567-1', page['text'])
+        self.assertIn('office@example.fi', page['text'])
+
+    def test_team_and_finnish_board_do_not_become_artist_lists(self):
+        page = corporate.parse_page('<main><h1>Tiimi</h1><h3>Example Producer</h3>'
+                                    '<p>Producer</p><h2>Artists</h2><h3>Visiting Artist</h3></main>',
+                                    'https://example.fi/team', 'governance')
+        self.assertEqual(page['people'][0]['group'], 'Tiimi')
+        self.assertEqual(page['people'][0]['name'], 'Example Producer')
+        self.assertEqual(len(page['people']), 1)
+
     def test_borme_repeated_roles_do_not_consume_hyphenated_names(self):
         html = ("<h5>123 - EXAMPLE SA.</h5><p>Revocaciones. "
                 "Apo.Man.Soli.: GARCIA-MON EJEMPLO ANTONIO. "

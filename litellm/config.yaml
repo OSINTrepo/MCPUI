@@ -111,6 +111,20 @@ model_list:
       max_input_tokens: 1000000
       max_output_tokens: 65536
 
+  # Qwen3 8B через Alibaba PAYG для сравнения с локальными малыми моделями.
+  - model_name: qwen3-8b-api
+    litellm_params:
+      model: openai/qwen3-8b
+      api_base: os.environ/QWEN_API_BASE
+      api_key: os.environ/DASHSCOPE_API_KEY
+      extra_body:
+        enable_thinking: false
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      max_input_tokens: 32768
+      max_output_tokens: 8192
+
   - model_name: qwen-plan-report
     litellm_params:
       model: openai/qwen3.7-plus

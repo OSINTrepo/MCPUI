@@ -126,7 +126,9 @@ def render(data, ctx):
     for group in groups:
         rows = [p for p in people if p['group'] == group]
         label = ('Совет директоров' if group.lower() in ('consejo de administración', 'board of directors') else
-                 'Исполнительное руководство' if group.lower() in ('comité de dirección', 'executive team', 'executive committee', 'equipo ejecutivo') else 'Комитет')
+                 'Исполнительное руководство' if group.lower() in ('comité de dirección', 'executive team', 'executive committee', 'equipo ejecutivo', 'руководство') else
+                 'Команда / редакция' if group.lower() in ('team', 'our team', 'tiimi', 'команда', 'редакция') else
+                 'Правление' if group.lower() in ('hallitus', 'правление') else 'Комитет')
         md += [f'## {label} — {group}', '',
                f"_Официальный сайт, чтение {rows[0].get('retrieved_at') or source.get('retrieved_at', '')}. "
                'Состав на дату чтения; не архив назначений._', '']
@@ -135,7 +137,7 @@ def render(data, ctx):
              f"[Состав органа]({p['source_url']})"] for p in rows]) + ['']
     if people:
         md += ['## Структура корпоративного управления', '',
-               '```mermaid', 'graph LR', '  company["Компания"]']
+               '```mermaid', 'graph LR', '  company["Организация"]']
         for i, group in enumerate(groups):
             md += [f'  company --> g{i}["{D._mm_label(group)}"]']
             # Схема показывает членство в органе, не предполагаемые линии подчинения.

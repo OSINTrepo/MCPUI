@@ -144,4 +144,11 @@ class MCPClient:
         res = data.get("result", {})
         text = " ".join(c.get("text", "") for c in res.get("content", [])
                         if isinstance(c, dict) and c.get("type") == "text")
-        return {"ok": not res.get("isError", False), "text": text[:max(MAX_TEXT, 120000) if tool in ("corporate_website", "borme_publications", "get_finances") else MAX_TEXT], "raw": res}
+        # История оплачивается целиком. Обрезка JSON теряла купленные снимки и
+        # превращала успешный ответ в непарсируемый текст. Для LLM история
+        # отдельно сокращается до групп наблюдений в dossier.whois_history_facts.
+        if tool != "whois_history":
+            limit = (max(MAX_TEXT, 120000) if tool in ("corporate_website", "borme_publications", "get_finances", "russia_connections", "newdb_get_result", "newdb_submit_request", "get_company")
+                     else (500000 if tool == "search" else MAX_TEXT))
+            text = text[:limit]
+        return {"ok": not res.get("isError", False), "text": text, "raw": res}

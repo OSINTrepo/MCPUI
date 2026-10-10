@@ -9,12 +9,17 @@ dossier.extract_domain_data / extract_company_data (с провенансом в
 """
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Callable
 
 import dossier as D
 import official
+import russia_links
+import organization_research
+import finland_registry
 
 DOMAIN, IP, COMPANY = "domain", "ip", "company"
 
@@ -56,6 +61,13 @@ def _number_tables(block: list[str], counter: list[int]) -> list[str]:
     return out
 
 
+# Эти блоки уже содержат точные значения и ограничения; повторный свободный
+# пересказ создавал ложные отрицания, ошибки чисел и атрибуции.
+NO_LLM_COMMENTS = {"c_russia_connections", "c_financials", "c_identity", "c_uz", "c_cse", "cse", "c_fi", "c_organization_research",
+                   "dns", "whois", "whois_history", "certs", "subdomains", "subdomain_ips",
+                   "geo", "ips", "ranges", "shodan", "cse_social", "cse_news", "cse_leaks"}
+
+
 def render_target(kind: str, data: dict, ctx: dict | None = None) -> list[str]:
     """Собрать markdown-секции для типа цели kind из общего data (parse-once).
     ctx['comments'] = {section_id: текст} — если задано, под секцией печатается
@@ -76,7 +88,7 @@ def render_target(kind: str, data: dict, ctx: dict | None = None) -> list[str]:
                 block = _number_tables(block, ctx["_tno"])
                 # Финансовые суммы и единицы уже проверены в таблице.
                 # Свободный пересказ LLM может перепутать миллионы и миллиарды.
-                c = None if s.id == "c_financials" else comments.get(s.id)
+                c = None if s.id in NO_LLM_COMMENTS else comments.get(s.id)
                 if c:
                     block = block + [f"**Вывод:** {c}", ""]
                 md += block
@@ -102,7 +114,7 @@ TITLES = {
     "ranges": "IP-диапазоны", "reverse_cohost": "Совместно размещённые домены",
     "geo": "География инфраструктуры", "certs": "SSL-сертификаты",
     "subdomains": "Поддомены", "subdomain_ips": "Поддомены→IP",
-    "files": "Связанные файлы", "shodan": "Живые активы (Shodan)",
+    "files": "Связанные файлы", "shodan": "Сервисы в индексе Shodan",
     "whois_history": "История регистрации", "reputation": "Репутация",
     "typosquat": "Домены-двойники (тайпсквоттинг)",
     "voidly_status": "Доступность по странам",
@@ -115,6 +127,7 @@ TITLES = {
     "c_officers": "Руководство", "c_borme": "Реестр Испании (BORME)",
     "c_sec": "SEC EDGAR", "c_wikipedia": "Wikipedia",
     "c_cse": "Веб-поиск", "c_sanctions": "Санкции",
+    "c_uz": "Справочники Узбекистана",
     "c_checko": "Реестр РФ (ЕГРЮЛ)", "c_financials": "Финансовые показатели",
     "c_companyscope": "Сводка из открытых источников", "c_filings": "Отчётность",
     "c_uk_ch": "Реестр Великобритании (Companies House)",
@@ -139,7 +152,12 @@ def _whois(data, ctx):
         ["Изменён", w.get("last_changed")],
         ["Статусы", ", ".join(w.get("status") or [])],
         ["NS", ", ".join(w.get("nameservers") or [])],
-    ])
+    ] + ([["Доступность домена по ответу провайдера", w.get("domainAvailability")]] if w.get("domainAvailability") else [])
+      + ([["Ограничение текущих данных WHOIS", w.get("dataError")]] if w.get("dataError") else []))
+    if w.get("domainAvailability") == "AVAILABLE":
+        md += ["", "_По текущему ответу провайдера домен доступен для регистрации. Действующие регистрационные сведения не получены; исторические записи относятся к прежним регистрациям._"]
+    elif w.get("dataError"):
+        md += ["", "_Текущие сведения WHOIS неполны или недоступны. Даты и регистранты из исторических записей не считаются действующими._"]
     return md + [""]
 
 
@@ -272,7 +290,7 @@ def _ip_kind(owner: str) -> str:
     for key, label in _CLOUD:
         if key in low:
             return label
-    return "собственная сеть" if owner and owner != "—" else "—"
+    return "владелец сети: " + owner + "; принадлежность компании не установлена" if owner and owner != "—" else "не установлен"
 
 
 def _whois_contacts(data, ctx):
@@ -351,18 +369,15 @@ def _certs(data, ctx):
     certs = data.get("certs") or []
     if not certs:
         return []
-    seen, uniq = set(), []
-    for c in certs:
-        k = (c.get("subject"), c.get("issuer"), c.get("valid_until"))
-        if k not in seen:
-            seen.add(k)
-            uniq.append(c)
-    active = [c for c in uniq if D._cert_active(c.get("valid_until"))]
-    historical = [c for c in uniq if not D._cert_active(c.get("valid_until"))]
-    md = [f"## SSL-сертификаты — {len(uniq)} "
-          f"(активных: {len(active)}, исторических: {len(historical)})", ""]
+    uniq = D.unique_certs(data)
+    groups = [(title, [c for c in uniq if D.cert_status(c) == status])
+              for title, status in (("Действующие по сроку", "active"),
+                                    ("Истёкшие", "expired"), ("Срок ещё не наступил", "future"),
+                                    ("Срок не установлен", "unknown"))]
+    md = [f"## SSL-сертификаты — {len(uniq)}", "",
+          "_Статус определён по датам; наличие в истории не доказывает использование сейчас._", ""]
     md += D._src_line(data, "certs")
-    for title, group in (("Активные", active), ("Исторические / истёкшие", historical)):
+    for title, group in groups:
         if not group:
             continue
         def _fp(c: dict) -> str:
@@ -389,8 +404,7 @@ def _certs(data, ctx):
 
 def _subdomains(data, ctx):
     domain = ctx.get("target", "")
-    subs = sorted(s for s in data.get("subdomains", set())
-                  if s.endswith(domain) and s != domain)
+    subs = D.domain_subdomains(domain, data)
     if not subs:
         return []
     groups: dict[str, list[str]] = {}
@@ -444,7 +458,9 @@ def _shodan(data, ctx):
                      (a.get("product") or a.get("service") or "—"),
                      a.get("version") or "—", str(a.get("http") or "—"),
                      a.get("org") or "—", a.get("risk") or "—"])
-    return [f"## Живые активы (Shodan) — {len(assets)}", ""] + D._src_line(data, "shodan") + \
+    return [f"## Сервисы на связанных IP по публичным индексам — {len(assets)}", "",
+            "_Это снимки публичного индекса, включая общий хостинг и исторические IP. "
+            "Принадлежность каждого сервиса исследуемой компании не установлена._", ""] + D._src_line(data, "shodan") + \
         D._md_table(["IP", "Порт", "Сервис", "Версия", "HTTP/TLS", "Организация",
                      "Потенциальные риски"], rows) + [""]
 
@@ -454,18 +470,51 @@ def _whois_history(data, ctx):
     if not hist:
         return []
     seen_h, rows = set(), []
-    for h in hist:
-        key = (h.get("registrarName"), h.get("createdDate"), h.get("updatedDate"))
+    def snapshot(record):
+        audit = record.get("audit") if isinstance(record.get("audit"), dict) else {}
+        return audit.get("createdDate") or audit.get("updatedDate") or record.get("observedDate")
+
+    records = [h for h in hist if isinstance(h, dict)]
+    records.sort(key=lambda h: (str(snapshot(h) or "~"), str(h.get("createdDate") or ""), str(h.get("updatedDate") or "")))
+    for h in records:
+        # Дедуплицируем только полностью совпадающие записи. Разные регистранты,
+        # сроки и даты наблюдения являются отдельными историческими сведениями.
+        key = json.dumps(h, ensure_ascii=False, sort_keys=True, default=str)
         if key in seen_h:
             continue
+        if not any((snapshot(h), h.get("domainType"), h.get("createdDate"), h.get("createdDateNormalized"), h.get("updatedDate"), h.get("expiresDate"), h.get("registrarName"), h.get("registrant"))):
+            continue
         seen_h.add(key)
-        rows.append([h.get("createdDate") or h.get("createdDateNormalized") or "—",
-                     h.get("updatedDate") or "—", h.get("registrarName") or "—",
-                     h.get("registrant") or "—"])
+        rows.append([snapshot(h) or "—", h.get("domainType") or "—",
+                     h.get("createdDate") or h.get("createdDateNormalized") or "—",
+                     h.get("updatedDate") or "—", h.get("expiresDate") or "—",
+                     h.get("registrarName") or "—", h.get("registrant") or "—",
+                     h.get("registrantName") or "—"])
     if not rows:
         return []
+    provenance = []
+    for source in data.get("whois_history_sources") or []:
+        cache = source.get("cache") or {}
+        fetched = cache.get("fetched_at")
+        if not fetched:
+            continue
+        try:
+            date = datetime.fromisoformat(str(fetched).replace("Z", "+00:00"))
+            fetched = (date.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+                       if date.tzinfo else str(fetched))
+        except (ValueError, TypeError):
+            pass
+        hint = "; использован сохранённый ответ, повторного запроса истории не было" if cache.get("status") == "hit" else ""
+        provider = D.html.escape(str(source.get("provider") or source.get("server") or "WHOIS"), quote=False)
+        fetched = D.html.escape(str(fetched), quote=False)
+        line = f"_История получена у источника {provider}: {fetched}{hint}._"
+        if line not in provenance:
+            provenance.extend([line, ""])
     return ["## Историческая регистрация (WHOIS History)", ""] + D._src_line(data, "whois_history") + \
-        D._md_table(["Создан", "Изменён", "Регистратор", "Регистрант"], rows[:15]) + [""]
+        provenance + \
+        [f"Получено исторических записей: {len(hist)}; показано после удаления одинаковых нормализованных записей: {len(rows)}.", ""] + \
+        D._md_table(["Снимок WHOIS", "Тип записи провайдера", "Создан", "Изменён", "Истекает", "Регистратор", "Регистрант", "Контактное имя WHOIS"], rows) + \
+        ["", "_«Снимок WHOIS» — дата сбора записи провайдером, а не дата регистрации домена. Отдельные снимки не устанавливают непрерывный период владения. Исторический регистрант может быть службой приватности или скрытым контактом; запись не подтверждает текущего владельца, принадлежность домена компании или гражданство человека. Тип записи — классификация источника: dropped/added не доказывают смену контроля, смену лица или ликвидацию компании._", ""]
 
 
 def _reputation(data, ctx):
@@ -617,7 +666,10 @@ def _cse_social(data, ctx):
     if not results:
         results = _cse_all_items(data)
     rows, seen = [], set()
+    terms = D._cse_terms(ctx.get('identity'), ctx.get('target', ''))
     for r in results:
+        if not D._cse_relevant({**r, 'link': r.get('link') or r.get('url')}, terms):
+            continue
         url = r.get("link") or r.get("url") or ""
         title = r.get("title") or ""
         for dom, platform in _SOCIAL_DOMAINS.items():
@@ -627,11 +679,10 @@ def _cse_social(data, ctx):
                 break
     if not rows:
         return []
-    md = ["## Социальные сети", "", "| Платформа | Профиль | URL |", "|---|---|---|"]
-    for platform, title, url in rows:
-        md.append(f"| {platform} | {title} | {url} |")
-    md.append("")
-    return md
+    md = ["## Упоминания в социальных сетях", "",
+          "_Поисковые совпадения, не подтверждённый список сотрудников или официальных аккаунтов. "
+          "Текущие должности и связь профиля с юридическим лицом требуют проверки._", ""]
+    return md + D._md_table(["Платформа", "Профиль", "URL"], rows) + [""]
 
 
 def _cse_news(data, ctx):
@@ -643,7 +694,10 @@ def _cse_news(data, ctx):
     if not results:
         results = _cse_all_items(data)
     rows, seen = [], set()
+    terms = D._cse_terms(ctx.get("identity"), ctx.get("target", ""))
     for r in results:
+        if not D._cse_relevant({**r, "link": r.get("link") or r.get("url")}, terms):
+            continue
         url = r.get("link") or r.get("url") or ""
         title = r.get("title") or ""
         snippet = r.get("snippet") or r.get("description") or ""
@@ -671,7 +725,10 @@ def _cse_leaks(data, ctx):
     if not results:
         results = _cse_all_items(data)
     rows, seen = [], set()
+    terms = D._cse_terms(ctx.get("identity"), ctx.get("target", ""))
     for r in results:
+        if not D._cse_relevant({**r, "link": r.get("link") or r.get("url")}, terms):
+            continue
         url = r.get("link") or r.get("url") or ""
         title = r.get("title") or ""
         snippet = r.get("snippet") or r.get("description") or ""
@@ -728,7 +785,8 @@ def _related_domains(data, ctx):
 
 # ------------------ секции корпоративного слоя (extract_company_data) --------
 _SRC_TITLE = {"sec_edgar": "SEC EDGAR", "gleif": "GLEIF (реестр LEI)",
-              "wikipedia": "Wikipedia", "domain": "официальный домен",
+              "wikipedia": "Wikipedia", "domain": "совпадение с доменом",
+              "uz_directory": "справочники Узбекистана", "checko": "Checko / ЕГРЮЛ",
               "gleif_hint": "GLEIF (подсказка)", "query": "запрос пользователя"}
 
 
@@ -749,10 +807,11 @@ def _c_identity(data, ctx):
             ["LEI", ident.get("lei")], ["CIK", ident.get("cik")],
             ["Тикеры", ", ".join(ident.get("tickers") or []) or None],
             ["Юрисдикция", ident.get("jurisdiction")],
-            ["Официальные домены", ", ".join(ident.get("domains") or []) or None],
+            ["Исследованные домены", ", ".join(ident.get("domains") or []) or None],
             ["Независимых подтверждений", str(ident.get("confirms", 0))],
             ["Уверенность", ident.get("confidence")]]
-    for key, label in (("inn", "ИНН"), ("ogrn", "ОГРН")):
+    for key, label in (("inn", "ИНН / STIR" if ident.get("jurisdiction") == "UZ" else "ИНН"),
+                       ("ogrn", "ОГРН"), ("registration_number", "Регистрационный номер")):
         if ident.get(key):
             rows.insert(2, [label, ident[key]])
     md += D._md_table(["Параметр", "Значение"], rows) + [""]
@@ -776,13 +835,53 @@ def _c_identity(data, ctx):
             crows) + [""]
     if not chosen:
         md += ["**Вывод:** ⚠ юрлицо не опознано — ни один кандидат не набрал "
-               "достаточных независимых подтверждений. Данные реестров ниже "
-               "не приводятся: приписать цели чужое юрлицо хуже, чем признать "
-               "пробел. Повторите запрос с точным юридическим названием или LEI.", ""]
+               "достаточных независимых подтверждений. Регистрационные сведения других "
+               "юрлиц не приписываются самой цели. Уточнить идентификацию помогут точное "
+               "юридическое название, регистрационный номер или LEI.", ""]
+        if (data.get("corporate_research") or {}).get("verified_company_count", 0):
+            md += ["Отдельные реестровые профили кандидатов и связанных через реестр компаний "
+                   "приведены в разделе расширенной проверки. Подтверждена их регистрационная "
+                   "личность; принадлежность исследуемому бренду и владение доменами "
+                   "этим не устанавливаются.", ""]
     elif ident.get("confidence") != "высокая":
         md += [f"**Вывод:** ⚠ гипотеза — «{chosen}» подтверждено "
-               f"{ident.get('confirms', 0)} источником; трактуйте корпоративный "
+               f"источниками: {ident.get('confirms', 0)}; трактуйте корпоративный "
                f"слой как предварительный.", ""]
+    return md
+
+
+def _c_uz(data, ctx):
+    uz = data.get("uz_directory")
+    if not uz:
+        return []
+    md = ["## Регистрационные сведения — Узбекистан", "",
+          "_Публичные коммерческие справочники. Государственная выписка не получена; "
+          "совпадение нескольких карточек не доказывает независимость их первичных данных._", ""]
+    labels = (("name", "Наименование"), ("tax_id", "ИНН / STIR"),
+              ("registration_number", "Регистрационный номер"), ("registered", "Дата регистрации"),
+              ("status", "Статус"), ("address", "Адрес"), ("director", "Руководитель"),
+              ("activity", "ОКЭД"), ("capital", "Уставный фонд (UZS)"))
+    for card in uz.get("records", []):
+        md += [f"### Карточка: {card['source_url']}", "",
+               f"Прочитана: {card.get('retrieved_at')}. "
+               f"Даты актуальности, указанные источником: {', '.join(card.get('source_dates') or []) or 'не указаны'}.", ""]
+        md += D._md_table(["Параметр", "Значение"], [[label, card.get(key)] for key, label in labels])
+        if card.get("founders"):
+            md += ["", "**Участники по данным карточки:**", ""]
+            md += D._md_table(["Участник", "Доля, %"],
+                             [[f["name"], str(f["share_percent"])] for f in card["founders"]])
+        md += [""]
+    if uz.get("conflicts"):
+        md += ["### Расхождения между карточками", ""]
+        for key, values in uz["conflicts"].items():
+            label = dict(labels).get(key, "Участники" if key == "founders" else key)
+            md += [f"- {label}: " + " / ".join(str(v) for v in values)]
+        md += ["", "_Не выбираем одно из противоречащих значений без первичного документа._", ""]
+    if uz.get("failures"):
+        md += ["**Непрочитанные карточки:**", ""]
+        md += [f"- {f['url']}: {f['reason']}" for f in uz["failures"]]
+        md += [""]
+    md += ["_Уставный фонд не является выручкой, прибылью или оценкой бизнеса._", ""]
     return md
 
 
@@ -824,6 +923,10 @@ def _c_financials(data, ctx):
     fin_raw = data.get("financials_raw")
     ticker_cands = data.get("ticker_candidates") or []
     if not fin and not sq and not fin_raw and not ticker_cands:
+        if data.get("uz_directory"):
+            return ["## Финансовые показатели", "",
+                    "_Проверяемая годовая отчётность в доступных источниках не получена. "
+                    "Выручка, прибыль и активы не установлены; отсутствие данных не означает нулевые значения._", ""]
         return []
     md = []
     # Рыночные данные (Yahoo Finance / stock_quote)
@@ -954,7 +1057,8 @@ def _c_structure(data, ctx):
 def _c_officers(data, ctx):
     off = data.get("officers")
     if not (off and off.get("officers")):
-        if (data.get("checko") or {}).get("director") or (data.get("official") or {}).get("people"):
+        if ((data.get("checko") or {}).get("director") or (data.get("official") or {}).get("people")
+                or any(r.get("director") for r in (data.get("uz_directory") or {}).get("records", []))):
             return []  # Руководство уже показано из реестра/официального сайта.
         # Источник упал ≠ должностных лиц нет. Раньше Connectify/401 у
         # OpenCorporates молча превращался в утверждение «руководство
@@ -1175,8 +1279,12 @@ SECTIONS: list[Section] = [
     Section("cse_leaks", _D, _cse_leaks),
     # --- корпоративный слой (kind=company; порядок как в прежнем render_company_sections) ---
     Section("c_official", _C, official.render),
+    Section("c_fi", _C, finland_registry.render),
+    Section("c_organization_research", _C, organization_research.render),
     Section("c_org", _C, _c_org),
     Section("c_checko", _C, _c_checko),
+    Section("c_uz", _C, _c_uz),
+    Section("c_russia_connections", _C, russia_links.render),
     Section("c_structure", _C, _c_structure),
     Section("c_officers", _C, _c_officers),
     Section("c_borme", _C, _c_borme),
